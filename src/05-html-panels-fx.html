@@ -1,0 +1,152 @@
+
+  <!-- ============ PANEL: EFFECTS BROWSER ============ -->
+  <div class="panel" id="panel-fx">
+    <div class="panel-h">
+      <span class="ph-title">Effects</span>
+      <div class="ph-r">
+        <span class="ph-sub">Video · Audio · Transitions</span>
+      </div>
+    </div>
+    <div class="panel-b">
+      <div class="fx-searchwrap">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="6.8" cy="6.8" r="4.3"/><path d="M10.1 10.1 14 14"/></svg>
+        <input id="fx-search" type="text" placeholder="Find effect…" spellcheck="false">
+      </div>
+      <div class="fx-body" id="fx-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ PANEL: AUDIO MIXER ============ -->
+  <div class="panel" id="panel-mixer">
+    <div class="panel-h">
+      <span class="ph-title">Audio Mixer</span>
+      <span class="ph-sub">Act_II_Master</span>
+      <div class="ph-r">
+        <span class="ph-sub">48 kHz · 32-bit float</span>
+        <button class="icb" data-tip="Mixer Options">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="5.5" cy="4" r="1.4" fill="#1e2124"/><circle cx="10.5" cy="8" r="1.4" fill="#1e2124"/><circle cx="6.5" cy="12" r="1.4" fill="#1e2124"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="panel-b">
+      <div class="mix-body" id="mix-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ PANEL: LUMETRI COLOR ============ -->
+  <div class="panel" id="panel-color">
+    <div class="panel-h">
+      <span class="ph-title">Lumetri Color</span>
+      <span class="ph-chip">Interview_Marta_Closeup · Master Clip</span>
+      <div class="ph-r">
+        <button class="icb" data-tip="Toggle Color Sliders">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 8h10M3 4.5h10M3 11.5h10"/><circle cx="6" cy="4.5" r="1.5" fill="#1e2124"/><circle cx="10.5" cy="8" r="1.5" fill="#1e2124"/><circle cx="5" cy="11.5" r="1.5" fill="#1e2124"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="panel-b">
+      <div class="ctabs">
+        <button class="ctab">Basic Correction</button>
+        <button class="ctab on">Color Wheels</button>
+        <button class="ctab">Creative</button>
+        <button class="ctab">Curves</button>
+      </div>
+      <div class="col-body">
+        <div class="wheels">
+          <div class="wheel-col">
+            <div class="wheel-t">Shadows</div>
+            <div class="wheel"><span class="wknob" style="left:22%;top:64%"></span></div>
+            <div class="wrow"><span class="wl">Hue</span><input class="rng" type="range" min="-180" max="180" value="-18"><input class="num" value="-18"></div>
+            <div class="wrow"><span class="wl">Sat</span><input class="rng" type="range" min="0" max="200" value="42"><input class="num" value="42"></div>
+            <div class="wrow"><span class="wl">Lum</span><input class="rng" type="range" min="-100" max="100" value="6"><input class="num" value="6"></div>
+          </div>
+          <div class="wheel-col">
+            <div class="wheel-t">Midtones</div>
+            <div class="wheel"><span class="wknob" style="left:56%;top:38%"></span></div>
+            <div class="wrow"><span class="wl">Hue</span><input class="rng" type="range" min="-180" max="180" value="8"><input class="num" value="8"></div>
+            <div class="wrow"><span class="wl">Sat</span><input class="rng" type="range" min="0" max="200" value="58"><input class="num" value="58"></div>
+            <div class="wrow"><span class="wl">Lum</span><input class="rng" type="range" min="-100" max="100" value="2"><input class="num" value="2"></div>
+          </div>
+          <div class="wheel-col">
+            <div class="wheel-t">Highlights</div>
+            <div class="wheel"><span class="wknob" style="left:62%;top:30%"></span></div>
+            <div class="wrow"><span class="wl">Hue</span><input class="rng" type="range" min="-180" max="180" value="14"><input class="num" value="14"></div>
+            <div class="wrow"><span class="wl">Sat</span><input class="rng" type="range" min="0" max="200" value="66"><input class="num" value="66"></div>
+            <div class="wrow"><span class="wl">Lum</span><input class="rng" type="range" min="-100" max="100" value="-4"><input class="num" value="-4"></div>
+          </div>
+        </div>
+        <div class="sec" style="margin:4px -10px 0">
+          <div class="sec-h" style="padding-left:18px"><span class="car"><i></i></span>Correction</div>
+        </div>
+        <div class="cgrid">
+          <div class="prow"><span class="pl">Temp</span><input class="rng" type="range" min="-100" max="100" value="-14"><input class="num" value="-14"><span class="unit">K</span></div>
+          <div class="prow"><span class="pl">Tint</span><input class="rng" type="range" min="-100" max="100" value="6"><input class="num" value="6"><span class="unit"></span></div>
+          <div class="prow"><span class="pl">Contrast</span><input class="rng" type="range" min="-100" max="100" value="8"><input class="num" value="8"><span class="unit"></span></div>
+          <div class="prow"><span class="pl">Saturation</span><input class="rng" type="range" min="0" max="200" value="105"><input class="num" value="105"><span class="unit">%</span></div>
+          <div class="prow"><span class="pl">Highlights</span><input class="rng" type="range" min="-100" max="100" value="-6"><input class="num" value="-6"><span class="unit"></span></div>
+          <div class="prow"><span class="pl">Shadows</span><input class="rng" type="range" min="-100" max="100" value="10"><input class="num" value="10"><span class="unit"></span></div>
+          <div class="prow"><span class="pl">Whites</span><input class="rng" type="range" min="-100" max="100" value="0"><input class="num" value="0"><span class="unit"></span></div>
+          <div class="prow"><span class="pl">Blacks</span><input class="rng" type="range" min="-100" max="100" value="-4"><input class="num" value="-4"><span class="unit"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ PANEL: TIMELINE ============ -->
+  <div class="panel" id="panel-timeline">
+    <div class="panel-h">
+      <span class="ph-title">Timeline</span>
+      <span class="ph-sub">Act_II_Master</span>
+      <div class="ph-r">
+        <span class="ph-sub">165 s · 3840×2160 · 23.976 fps · 7 tracks</span>
+        <button class="icb" data-tip="Timeline Display Settings">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2 4h12M2 8h12M2 12h12"/><circle cx="5.5" cy="4" r="1.4" fill="#1e2124"/><circle cx="10.5" cy="8" r="1.4" fill="#1e2124"/></svg>
+        </button>
+        <button class="icb" data-tip="Render In to Out" data-key="Enter">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.5 3.5h11v9h-11z"/><path d="M5.5 6.5l3 2-3 2z" fill="currentColor" stroke="none"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="tl-bar">
+      <div class="tlc-box" id="tl-tc">00:00:37:14</div>
+      <span class="vsep"></span>
+      <button class="tlt on" data-tool="select" data-tip="Selection Tool" data-key="V">
+        <svg width="13" height="13" viewBox="0 0 16 16"><path d="M4 1.5v11l2.7-2.5 1.8 4.1 1.6-.8-1.8-4 3.8-.3z" fill="currentColor"/></svg>
+      </button>
+      <button class="tlt" data-tool="razor" data-tip="Razor Tool" data-key="C">
+        <svg width="13" height="13" viewBox="0 0 16 16"><path d="M2.4 13.6 10.6 5.4l1.9 1.9-8.2 8.2-2.5.7z" fill="currentColor"/><circle cx="12.9" cy="3.1" r="1" fill="currentColor"/></svg>
+      </button>
+      <span class="vsep"></span>
+      <button class="tlt on" id="tl-snap" data-tip="Snap" data-key="S">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M4 2.6h2.8v5a1.2 1.2 0 0 0 2.4 0v-5H12v5.4a4 4 0 0 1-8 0zM4 5h2.8M9.2 5H12"/></svg>
+      </button>
+      <button class="tlt" data-tip="Add Marker" data-key="M">
+        <svg width="12" height="12" viewBox="0 0 16 16"><rect x="6" y="4" width="4" height="4" transform="rotate(45 8 8)" fill="currentColor"/></svg>
+      </button>
+      <span class="vsep"></span>
+      <button class="tlt" data-tip="Track Targeting: V1 · A1">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 3.5h4v3H3zM9 3.5h4v3H9zM3 9.5h4v3H3zM9 9.5h4v3H9z"/></svg>
+      </button>
+      <div class="tl-right">
+        <span class="tl-zlbl">Time Zoom</span>
+        <button class="zbtn" id="tl-zo" data-tip="Zoom Out" data-key="-">−</button>
+        <input class="rng" id="tl-zoom" type="range" min="4" max="48" value="14" data-tip="Timeline Zoom">
+        <button class="zbtn" id="tl-zi" data-tip="Zoom In" data-key="+">+</button>
+        <button class="tlt" id="tl-fit" data-tip="Fit Sequence" data-key="\">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="tl-body">
+      <div class="tl-headers" id="tl-headers"></div>
+      <div class="tl-scroll" id="tl-scroll">
+        <div class="tl-content" id="tl-content">
+          <div class="tl-ruler" id="tl-ruler"></div>
+          <div class="tl-tracks" id="tl-tracks"></div>
+          <div class="tl-ph" id="tl-ph" data-tip="Playhead · 00:00:37:14"><span class="ph-grip"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /panel-store -->
