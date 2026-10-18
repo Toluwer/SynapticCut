@@ -1,0 +1,385 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 14 UI PANELS: properties + effect controls (live-bound),
+   audio mixer (real faders / meters), effects browser, status bar
+   ===================================================================== */
+const Panels={_focusOld:null,_focusPath:null,
+
+  /* ---------------- shared section builders ---------------- */
+  section(title,rowsHTML,open){
+    return '<div class="sec'+(open===false?'':' open')+'">'+
+      '<div class="sec-h"><span class="car"><i></i></span>'+title+'</div>'+
+      '<div class="sec-b">'+rowsHTML+'</div></div>';
+  },
+  proNumber(label,path,val,min,max,step,unit,decimals){
+    return '<div class="prow"><span class="pl">'+label+'</span>'+
+      '<input class="rng" type="range" data-prop="'+path+'" min="'+min+'" max="'+max+'" step="'+step+'" value="'+val+'">'+
+      '<input class="num" type="text" data-prop="'+path+'" data-num="1" value="'+(+val).toFixed(decimals||0)+'">'+
+      (unit?'<span class="unit">'+unit+'</span>':'')+'</div>';
+  },
+
+  bindPropInputs(container,clip){
+    if(!container||!clip)return;
+    container.querySelectorAll('input[data-prop]').forEach(inp=>{
+      const path=inp.dataset.prop;
+      const apply=v=>{
+        let val;
+        if(inp.type==='range')val=+v;
+        else{
+          val=parseFloat(String(v).replace(',','.'));
+          if(!isFinite(val))return;
+          const rng=container.querySelector('input[type="range"][data-prop="'+path+'"]');
+          if(rng){val=clamp(val,+rng.min,+rng.max);rng.value=val;}
+        }
+        const dec=(path==='transform.rotation'||path==='audio.volumeDb')?1:0;
+        const num=container.querySelector('input[data-num][data-prop="'+path+'"]');
+        if(num&&document.activeElement!==num)num.value=val.toFixed(dec);
+        setPath(clip,path,val);
+        Store.setDirty(true);
+        if(path.startsWith('audio.'))Engine.Audio.setClipGain(clip);
+        Bus.emit('clip',clip.id);
+      };
+      inp.addEventListener('focus',()=>{
+        Panels._focusOld=getPath(clip,path);
+        Panels._focusPath=path;
+      });
+      inp.addEventListener('input',e=>apply(e.target.value));
+      inp.addEventListener('change',e=>{
+        apply(e.target.value);
+        const old=Panels._focusOld,val=getPath(clip,path);
+        if(Panels._focusPath===path&&old!=null&&old!==val){
+          /* push an undo entry that restores the pre-focus value */
+          Cmd._u.push({label:'Edit '+path.split('.').pop(),undo(){setPath(clip,path,old);Bus.emit('clip',clip.id);},do(){setPath(clip,path,val);Bus.emit('clip',clip.id);}});
+          Cmd._r.length=0;
+          Bus.emit('history');
+        }
+        Panels._focusOld=null;Panels._focusPath=null;
+      });
+    });
+  },
+
+  clipSections(clip){
+    const a=Model.asset(clip.assetId);
+    const t=clip.transform;
+    const hasAudio=a&&(a.kind==='audio'||a.kind==='tone'||(a.kind==='video'&&a.meta.hasAudio!==false));
+    let html='';
+    html+=this.section('Transform',
+      '<div class="prow"><span class="pl">Position</span>'+
+      '<input class="num" type="text" data-prop="transform.x" data-num="1" value="'+t.x.toFixed(0)+'"><span class="unit">x</span>'+
+      '<input class="num" type="text" data-prop="transform.y" data-num="1" value="'+t.y.toFixed(0)+'"><span class="unit">px</span></div>'+
+      this.proNumber('Scale','transform.scale',t.scale,10,400,1,'%',0)+
+      this.proNumber('Rotation','transform.rotation',t.rotation,-180,180,1,'°',1));
+    html+=this.section('Opacity',
+      this.proNumber('Opacity','transform.opacity',t.opacity,0,100,1,'%',0));
+    if(hasAudio){
+      html+=this.section('Audio',
+        this.proNumber('Volume','audio.volumeDb',clip.audio.volumeDb,-48,6,0.5,'dB',1));
+    }
+    return html;
+  },
+  infoBlock(clip){
+    const a=Model.asset(clip.assetId);
+    if(!a)return'';
+    const fps=Store.fps();
+    const tr=Model.trackFor(Store.seq,clip.trackId);
+    return '<div class="props-info">'+
+      '<b>'+escHtml(a.name)+'</b> on '+(tr?tr.id:'?')+'<br>'+
+      (a.fileName?a.fileName+' · '+fmtBytes(a.fileSize)+'<br>':'')+
+      'In '+fmtTC(clip.start,fps)+' · Out '+fmtTC(Model.clipEnd(clip),fps)+' · Dur '+fmtTC(clip.duration,fps)+'<br>'+
+      (a.offline?'<span style="color:#d38981">Media offline — right-click in Project to relink</span>':Bin.fmtOf(a))+
+      '</div>';
+  },
+
+  renderProps(){
+    const body=$('#pp-body'),chip=$('#pp-chip'),badge=$('#pp-badge');
+    if(!body||!Store.p)return;
+    const sel=TL.selInfo();
+    if(sel){
+      const {clip}=sel;
+      const a=Model.asset(clip.assetId);
+      chip.textContent=clip.name;
+      const off=a&&a.offline;
+      badge.textContent=off?'Offline':'Linked';
+      badge.className='badge '+(off?'bad':'ok');
+      body.innerHTML=this.clipSections(clip)+this.infoBlock(clip);
+      this.bindPropInputs(body,clip);
+    }else if(S.selClips.size>1){
+      chip.textContent=S.selClips.size+' clips';
+      badge.textContent='Multi';badge.className='badge neu';
+      body.innerHTML='<div class="props-info">'+S.selClips.size+' clips selected.<br>Use Edit menu commands or Delete to modify the selection.</div>';
+    }else if(S.selAsset){
+      const a=Model.asset(S.selAsset);
+      if(a){
+        chip.textContent=a.name;
+        const st=Bin.statusOf(a);
+        badge.textContent=st.lbl;badge.className='badge '+st.cls;
+        const fps=Store.fps();
+        body.innerHTML='<div class="props-info">'+
+          '<b>'+escHtml(a.name)+'</b><br>'+
+          (a.fileName?a.fileName+' · '+fmtBytes(a.fileSize)+'<br>':'')+
+          'Duration '+fmtTC(a.duration||0,fps)+'<br>'+
+          Bin.fmtOf(a)+'<br>'+
+          (a.offline?'<span style="color:#d38981">Media offline — right-click to relink</span><br>':'')+
+          '</div>'+
+          (a.kind!=='sequence'
+            ?'<div class="mbtnrow" style="padding:6px 8px"><span class="pl"></span>'+
+             '<button class="tbtn" id="pp-open-src">Open in Source Monitor</button></div>':'');
+        const btn=$('#pp-open-src');
+        if(btn)btn.addEventListener('click',()=>Source.open(a.id));
+      }
+    }else{
+      chip.textContent='—';
+      badge.textContent='—';badge.className='badge neu';
+      body.innerHTML='<div class="props-info">Select a clip in the timeline or an asset in the Project panel to inspect it.</div>';
+    }
+  },
+
+  renderEC(){
+    const body=$('#ec-body'),chip=$('#ec-chip');
+    if(!body||!Store.p)return;
+    const sel=TL.selInfo();
+    if(sel){
+      const {clip}=sel;
+      chip.textContent=clip.name;
+      body.innerHTML=this.clipSections(clip)+
+        '<div class="props-info">Fixed effects are applied by the compositor in real time. Keyframes arrive in Milestone 4.</div>';
+      this.bindPropInputs(body,clip);
+    }else{
+      chip.textContent='—';
+      body.innerHTML='<div class="props-info">Select a clip to edit its fixed effects (Motion, Opacity, Audio).</div>';
+    }
+  },
+
+  /* ---------------- mixer ---------------- */
+  buildMixer(){
+    const body=$('#mix-body');
+    if(!body)return;
+    const s=Store.seq;
+    body.innerHTML='';
+    if(!s){
+      body.innerHTML='<div class="tl-empty-hint" style="padding:14px">No sequence.</div>';
+      return;
+    }
+    const scale=document.createElement('div');
+    scale.className='mix-scale';
+    ['+6','0','-12','-24','-48','-∞'].forEach(t=>{
+      const sp=document.createElement('span');sp.textContent=t;scale.appendChild(sp);});
+    body.appendChild(scale);
+    const wrap=document.createElement('div');
+    wrap.className='mix-strips';
+    const audioTracks=s.tracks.filter(t=>t.kind==='audio');
+    audioTracks.forEach(tr=>wrap.appendChild(this.buildStrip(tr,false)));
+    const master={id:'M',name:'Master',gainDb:0,mute:false,solo:false};
+    wrap.appendChild(this.buildStrip(master,true));
+    body.appendChild(wrap);
+  },
+  buildStrip(tr,isMaster){
+    const st=document.createElement('div');
+    st.className='strip'+(isMaster?' master':'');
+    st.dataset.track=isMaster?'__master':tr.id;
+    const db=tr.gainDb||0;
+    const topPct=(6-db)/66*100;
+    st.innerHTML=
+      '<div class="strip-nm">'+tr.name+'</div>'+
+      '<div class="strip-id">'+(isMaster?'MASTER':tr.id+' · '+tr.name)+'</div>'+
+      '<div class="strip-mid">'+
+        '<div class="meter"><div class="mb"><i style="height:0"></i><span class="peak" style="bottom:0"></span></div>'+
+        '<div class="mb"><i style="height:0"></i><span class="peak" style="bottom:0"></span></div></div>'+
+        '<div class="faderwrap"><div class="fader"><span class="th" style="top:calc('+topPct+'% - 7px)"></span></div></div>'+
+      '</div>'+
+      '<div class="strip-db">'+(db>0?'+':'')+db.toFixed(1)+' dB</div>'+
+      (isMaster
+        ?'<div class="strip-btns"><span class="sbtn" style="width:46px" data-tip="Master Output">OUTPUT</span></div>'
+        :'<div class="strip-btns">'+
+          '<button class="sbtn m'+(tr.mute?' on':'')+'" data-tip="Mute '+tr.id+'">M</button>'+
+          '<button class="sbtn s'+(tr.solo?' on s':'')+'" data-tip="Solo '+tr.id+'">S</button>'+
+        '</div>');
+    if(!isMaster){
+      st.querySelectorAll('.sbtn').forEach(b=>b.addEventListener('click',()=>{
+        const s=Store.seq;if(!s)return;
+        const track=s.tracks.find(t=>t.id===tr.id);
+        if(!track)return;
+        if(track.locked){action('Track '+track.id+' is locked');return;}
+        if(b.classList.contains('m'))track.mute=!track.mute;
+        else track.solo=!track.solo;
+        Store.setDirty(true);
+        Bus.emit('tracks');
+      }));
+    }
+    /* fader drag -> track gain (live, drives the WebAudio bus) */
+    const fader=st.querySelector('.fader');
+    if(fader){
+      fader.addEventListener('pointerdown',e=>{
+        if(isMaster)return;
+        e.preventDefault();
+        const rect=fader.getBoundingClientRect();
+        const set=cy=>{
+          const frac=clamp((cy-rect.top)/rect.height,0,1);
+          const db=Math.round(clamp(6-frac*66,-48,6)*2)/2;
+          const s=Store.seq;
+          const track=s?s.tracks.find(t=>t.id===tr.id):null;
+          if(!track)return;
+          track.gainDb=db;
+          st.querySelector('.strip-db').textContent=(db>0?'+':'')+db.toFixed(1)+' dB';
+          st.querySelector('.fader .th').style.top='calc('+((6-db)/66*100)+'% - 7px)';
+          Engine.Audio.setTrackGains();
+          Store.setDirty(true);
+        };
+        set(e.clientY);
+        const mv=ev=>set(ev.clientY);
+        const up=()=>{
+          document.removeEventListener('pointermove',mv);
+          document.removeEventListener('pointerup',up);
+          action(tr.id+' gain '+(tr.gainDb>0?'+':'')+tr.gainDb.toFixed(1)+' dB');
+        };
+        document.addEventListener('pointermove',mv);
+        document.addEventListener('pointerup',up);
+      });
+    }
+    return st;
+  },
+  syncMixerStates(){
+    /* keep M/S buttons + fader positions in step with track header toggles */
+    const s=Store.seq;
+    if(!s)return;
+    s.tracks.filter(t=>t.kind==='audio').forEach(tr=>{
+      const st=$('#mix-body .strip[data-track="'+tr.id+'"]');
+      if(!st)return;
+      const m=st.querySelector('.sbtn.m'),so=st.querySelector('.sbtn.s'),db=st.querySelector('.strip-db');
+      if(m)m.classList.toggle('on',tr.mute);
+      if(so)so.classList.toggle('on',tr.solo),so.classList.toggle('s',tr.solo);
+      if(db)db.textContent=(tr.gainDb>0?'+':'')+ (tr.gainDb||0).toFixed(1)+' dB';
+      const th=st.querySelector('.fader .th');
+      if(th)th.style.top='calc('+((6-(tr.gainDb||0))/66*100)+'% - 7px)';
+    });
+  },
+  _peakHold:new Map(),
+  tickMeters(){
+    const body=$('#mix-body');
+    if(!body)return;
+    const strips=body.querySelectorAll('.strip');
+    if(!strips.length)return;
+    const now=performance.now();
+    strips.forEach(st=>{
+      const id=st.dataset.track;
+      const anaL=st.querySelector('.mb:nth-child(1)'),anaR=st.querySelector('.mb:nth-child(2)');
+      const bars=st.querySelectorAll('.meter .mb i');
+      const peaks=st.querySelectorAll('.meter .mb .peak');
+      if(!bars.length)return;
+      let dbL=-120,dbR=-120;
+      if(id==='__master'){
+        if(AudioGraph.ready){dbL=AudioGraph.meter(AudioGraph.mAnaL);dbR=AudioGraph.meter(AudioGraph.mAnaR);}
+      }else{
+        const bus=AudioGraph.bus(id);
+        if(bus){dbL=AudioGraph.meter(bus.anaL);dbR=AudioGraph.meter(bus.anaR);}
+      }
+      const pct=db=>clamp((db+48)/54*100,0,100);
+      bars[0].style.height=pct(dbL)+'%';
+      if(bars[1])bars[1].style.height=pct(dbR)+'%';
+      /* peak hold with 900 ms decay */
+      const hold=this._peakHold.get(id)||{L:0,R:0,t:0};
+      if(dbL>hold.L)hold.L=dbL;
+      if(dbR>hold.R)hold.R=dbR;
+      if(now-hold.t>900){hold.L=Math.max(-120,hold.L-3);hold.R=Math.max(-120,hold.R-3);}
+      hold.t=now;
+      this._peakHold.set(id,hold);
+      if(peaks[0])peaks[0].style.bottom=pct(hold.L)+'%';
+      if(peaks[1])peaks[1].style.bottom=pct(hold.R)+'%';
+    });
+  },
+
+  /* ---------------- effects browser (searchable catalog) ---------------- */
+  FXG:[
+    {n:'Audio Effects',k:'aud',open:0,items:['DeNoise','DeReverb','Bass','Treble','Balance','Pitch Shifter','Parametric Equalizer','Notch Filter','Vocal Enhancer','Dynamics']},
+    {n:'Blur & Sharpen',k:'vid',open:1,items:['Gaussian Blur','Directional Blur','Camera Blur','Radial Blur','Channel Blur','Compound Blur','Sharpen','Unsharp Mask','Antialias']},
+    {n:'Color Correction',k:'vid',open:1,items:['Lumetri Color','Fast Color Corrector','Three-Way Color Corrector','ProcAmp','RGB Curves','Video Limiter','Brightness & Contrast','Color Balance','Auto Contrast']},
+    {n:'Distort',k:'vid',open:0,items:['Lens Distortion','Transform','Warp Stabilizer','Turbulent Displace','Mirror','Spherize','Wave Warp','Corner Pin','Ripple']},
+    {n:'Generate',k:'vid',open:0,items:['4-Color Gradient','Circle','Grid','Lens Flare','Ramp','Gradient','Write-on','Paint Bucket']},
+    {n:'Keying',k:'vid',open:0,items:['Ultra Key','Color Key','Luma Key','Track Matte Key','Difference Matte','Non Red Key']},
+    {n:'Time',k:'vid',open:0,items:['Echo','Posterize Time','Timewarp']},
+    {n:'Video Transitions',k:'vid',open:0,items:['Cross Dissolve','Dip to Black','Dip to White','Film Dissolve','Push','Slide','Wipe','Iris']},
+    {n:'Audio Transitions',k:'aud',open:0,items:['Constant Power','Constant Gain','Exponential Fade']}
+  ],
+  buildFx(){
+    const body=$('#fx-body');
+    if(!body)return;
+    body.innerHTML='';
+    const q=S.fxSearch.toLowerCase();
+    this.FXG.forEach(g=>{
+      const items=q?g.items.filter(i=>i.toLowerCase().includes(q)):g.items;
+      if(q&&!items.length)return;
+      const gx=document.createElement('div');
+      gx.className='fxg'+((g.open&&!q)?' open':'');
+      gx.innerHTML='<div class="fxg-h"><span class="car"><i></i></span>'+g.n+
+        '<span class="cnt">'+items.length+'</span></div><div class="fxg-rows"></div>';
+      gx.querySelector('.fxg-h').addEventListener('click',()=>gx.classList.toggle('open'));
+      const rows=gx.querySelector('.fxg-rows');
+      items.forEach(nm=>{
+        const r=document.createElement('div');
+        r.className='fxr'+(nm===S.fxSel?' sel':'');
+        r.innerHTML='<span class="fxc'+(g.k==='aud'?' aud':'')+'">'+(g.k==='aud'?'∿':'fx')+'</span><span>'+nm+
+          '</span><span class="grip"><i></i><i></i><i></i></span>';
+        r.addEventListener('click',()=>{S.fxSel=nm;Panels.buildFx();});
+        r.addEventListener('contextmenu',e=>{
+          e.preventDefault();
+          openMenu(null,[
+            {t:'Apply to Selection',dis:true},
+            {t:'Save Preset…',dis:true}
+          ],e.clientX,e.clientY);
+        });
+        rows.appendChild(r);
+      });
+      body.appendChild(gx);
+    });
+    if(!body.children.length)body.innerHTML='<div class="bin-empty">No effects match the search.</div>';
+  },
+
+  /* ---------------- status bar ---------------- */
+  selStatus(){
+    const el=$('#sb-sel');
+    if(!el)return;
+    const fps=Store.fps();
+    const sel=TL.selInfo();
+    if(sel){
+      const {clip,track}=sel;
+      el.textContent=track.id+' · '+clip.name+' · In '+fmtTC(clip.start,fps)+' · Out '+fmtTC(Model.clipEnd(clip),fps);
+    }else if(S.selClips.size>1){
+      el.textContent=S.selClips.size+' clips selected';
+    }else if(S.selAsset){
+      const a=Model.asset(S.selAsset);
+      el.textContent=a?('Asset · '+a.name):'No selection';
+    }else{
+      el.textContent='No selection';
+    }
+  }
+};
+
+/* section collapse (delegated once) */
+document.addEventListener('click',e=>{
+  const sh=e.target.closest('.sec-h');
+  if(sh)sh.parentElement.classList.toggle('open');
+  const ctab=e.target.closest('.ctab');
+  if(ctab)$$('.ctab').forEach(x=>x.classList.toggle('on',x===ctab));
+});
+
+/* ================= RENDER ORCHESTRATION ================= */
+function renderAll(){
+  Shell.refreshChrome();
+  Bin.renderTree();
+  Bin.render();
+  TL.build();
+  TL.render();
+  Panels.renderProps();
+  Panels.renderEC();
+  Panels.buildMixer();
+  Panels.buildFx();
+  Engine.Audio.rebuildBuses();
+  Engine.Audio.setTrackGains();
+  Engine.Compositor.applyRes();
+  Engine.Compositor.needDraw=true;
+  Mon.syncTabs();
+  Mon.updateTC();
+  Mon.updateScrubBar();
+}
+</script>

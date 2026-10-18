@@ -61,6 +61,10 @@ class Extractor(HTMLParser):
         attr_str = "".join(
             f' {k}="{esc_attr(v if v is not None else k)}"' for k, v in attrs
         )
+        if tag == "svg":
+            # inline SVG inside the XHTML foreignObject must carry its own
+            # namespace, or the XML parser treats it as an unknown element
+            attr_str = ' xmlns="http://www.w3.org/2000/svg"' + attr_str
         if tag in VOID:
             self.body.append(f"<{tag}{attr_str}/>")
         else:
@@ -73,6 +77,8 @@ class Extractor(HTMLParser):
         attr_str = "".join(
             f' {k}="{esc_attr(v if v is not None else k)}"' for k, v in attrs
         )
+        if tag == "svg":
+            attr_str = ' xmlns="http://www.w3.org/2000/svg"' + attr_str
         self.body.append(f"<{tag}{attr_str}/>")
 
     def handle_endtag(self, tag):
@@ -98,9 +104,9 @@ class Extractor(HTMLParser):
 
     def handle_data(self, data):
         if self._mode == "style":
-            self._buf.append(data)
+            self._buf.append(esc(data))  # CSS may contain '>' selectors; keep XML-safe
         elif self._mode == "script":
-            self._buf.append(data)
+            self._buf.append(data)       # scripts are CDATA-wrapped later
         elif self._in_body:
             self.body.append(esc(data))
 

@@ -1,0 +1,221 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 06 CORE: DOM helpers, utils, event bus, store, commands
+   ===================================================================== */
+const $=(s,r=document)=>r.querySelector(s);
+const $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const SC={version:'0.1.0',milestone:1};
+
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dbToLin=db=>Math.pow(10,db/20);
+const linToDb=l=>20*Math.log10(Math.max(l,1e-6));
+
+function fmtTC(sec,fps){
+  const F=Math.max(1,Math.round(fps||25));
+  const fr=Math.max(0,Math.round((sec||0)*F));
+  const f=fr%F,s=Math.floor(fr/F);
+  const p=v=>String(v).padStart(2,'0');
+  return p(Math.floor(s/3600))+':'+p(Math.floor(s/60)%60)+':'+p(s%60)+':'+p(f);
+}
+function fmtShort(t){
+  const p=v=>String(v).padStart(2,'0');
+  return p(Math.floor(t/60))+':'+p(Math.floor(t)%60);
+}
+function fmtBytes(n){
+  if(!n&&n!==0)return '';
+  if(n<1024)return n+' B';
+  if(n<1048576)return (n/1024).toFixed(1)+' KB';
+  if(n<1073741824)return (n/1048576).toFixed(1)+' MB';
+  return (n/1073741824).toFixed(2)+' GB';
+}
+function timeAgo(iso){
+  const d=new Date(iso),now=new Date();
+  const s=(now-d)/1000;
+  if(s<60)return 'Just now';
+  if(s<3600)return Math.floor(s/60)+' min ago';
+  if(s<86400&&now.getDate()===d.getDate())return Math.floor(s/3600)+' h ago';
+  if(s<172800)return 'Yesterday';
+  const days=Math.floor(s/86400);
+  if(days<30)return days+' days ago';
+  return d.toLocaleDateString();
+}
+function action(msg){
+  const el=$('#status-action');if(!el)return;
+  el.textContent=msg;clearTimeout(action._t);
+  action._t=setTimeout(()=>{el.textContent='';},4200);
+}
+function getPath(obj,path){
+  return path.split('.').reduce((o,k)=>o==null?undefined:o[k],obj);
+}
+function setPath(obj,path,v){
+  const ks=path.split('.');const last=ks.pop();
+  const tgt=ks.reduce((o,k)=>o[k],obj);
+  tgt[last]=v;
+}
+
+/* innerHTML in an XML document (our SVG CDN artifact) must be well-formed
+   XHTML. Normalize generated markup by self-closing HTML void elements and
+   escaping bare ampersands (e.g. effect names like "Blur & Sharpen"). */
+const VOID_RE=/<(input|br|hr|img|meta|link|col|area|base|embed|param|source|track|wbr)((?:[^>'"]|'[^']*'|"[^"]*")*?)\s*\/?>/gi;
+function xhtml(html){
+  return String(html)
+    .replace(/&(?!#\d+;|#x[0-9a-fA-F]+;|\w+;)/g,'&amp;')
+    .replace(/<svg(?![^>]*\bxmlns=)/gi,'<svg xmlns="http://www.w3.org/2000/svg"')
+    .replace(VOID_RE,'<$1$2/>');
+}
+/* escape user-derived strings (file names, project names) interpolated into markup */
+function escHtml(s){
+  return String(s==null?'':s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+(function(){
+  const desc=Object.getOwnPropertyDescriptor(Element.prototype,'innerHTML');
+  if(!desc||!desc.set)return;
+  Object.defineProperty(Element.prototype,'innerHTML',{
+    set(v){desc.set.call(this,xhtml(v));},
+    get(){return desc.get.call(this);},
+    configurable:true
+  });
+})();
+
+/* In an XML document (SVG artifact), document.createElement() builds
+   namespace-less elements with no HTMLElement APIs (.style, .classList,
+   canvas contexts). Route all creation through the XHTML namespace,
+   which yields real HTML elements in both HTML and XML documents. */
+(function(){
+  const XNS='http://www.w3.org/1999/xhtml';
+  const native=document.createElementNS.bind(document);
+  document.createElement=function(tag){return native(XNS,String(tag));};
+})();
+
+/* ================= EVENT BUS ================= */
+const Bus={
+  _m:new Map(),
+  on(ev,fn){if(!this._m.has(ev))this._m.set(ev,[]);this._m.get(ev).push(fn);return fn;},
+  off(ev,fn){const l=this._m.get(ev);if(l){const i=l.indexOf(fn);if(i>=0)l.splice(i,1);}},
+  emit(ev,data){const l=this._m.get(ev);if(l)for(const fn of [...l]){try{fn(data);}catch(err){console.error('[bus:'+ev+']',err);}}}
+};
+
+/* ================= UI STATE (session only, never persisted) ================= */
+const S={
+  ws:'editing',tool:'select',snap:true,safe:false,
+  srcTab:'program',resScale:1,monZoom:'Fit',loop:false,
+  folder:'footage',search:'',sort:{k:'name',d:1},
+  fxSearch:'',fxSel:null,
+  zoom:14,selClips:new Set(),selAsset:null,srcAssetId:null,
+  dragging:null
+};
+
+/* ================= STORE ================= */
+const Store={
+  p:null,            // active project (model)
+  dirty:false,
+  setDirty(v=true){if(this.dirty!==!!v){this.dirty=!!v;Bus.emit('dirty',this.dirty);}},
+  get seq(){const p=this.p;if(!p)return null;return p.sequences.find(x=>x.id===p.activeSequenceId)||null;},
+  fps(){return this.p?this.p.settings.fps:25;},
+  W(){return this.p?this.p.settings.width:1920;},
+  H(){return this.p?this.p.settings.height:1080;}
+};
+
+/* ================= UNDO / REDO COMMAND STACK ================= */
+const Cmd={
+  _u:[],_r:[],
+  run(cmd){
+    cmd.do();this._u.push(cmd);this._r.length=0;
+    Store.setDirty(true);this._changed();
+  },
+  undo(){
+    const c=this._u.pop();if(!c){action('Nothing to undo');return false;}
+    c.undo();this._r.push(c);Store.setDirty(true);this._changed();
+    action('Undo '+c.label);return true;
+  },
+  redo(){
+    const c=this._r.pop();if(!c){action('Nothing to redo');return false;}
+    c.do();this._u.push(c);Store.setDirty(true);this._changed();
+    action('Redo '+c.label);return true;
+  },
+  canUndo(){return this._u.length>0;},
+  canRedo(){return this._r.length>0;},
+  undoLabel(){const c=this._u[this._u.length-1];return c?c.label:null;},
+  redoLabel(){const c=this._r[this._r.length-1];return c?c.label:null;},
+  clear(){this._u.length=0;this._r.length=0;this._changed();},
+  _changed(){Bus.emit('history');}
+};
+
+/* ================= ID SERVICE ================= */
+const ID={
+  _c:{},
+  init(counters){this._c=counters||{};},
+  next(p){this._c[p]=(this._c[p]||0)+1;return p+'-'+this._c[p];},
+  counters(){return JSON.parse(JSON.stringify(this._c));}
+};
+
+/* ================= MODEL COMMANDS (undoable operations) ================= */
+function cmdAddAssets(assets){
+  Cmd.run({
+    label:assets.length>1?'Import Media ('+assets.length+' items)':'Import Media',
+    do(){assets.forEach(a=>{Store.p.assets[a.id]=a;});Bus.emit('assets');},
+    undo(){
+      assets.forEach(a=>{
+        Model.removeAsset(Store.p,a.id);
+        Engine.Audio.purgeAsset(a.id);
+      });
+      Bus.emit('assets');
+    }
+  });
+}
+function cmdAddClips(pairs){ // pairs: [{clip}]
+  const seq=Store.seq;if(!seq)return;
+  Cmd.run({
+    label:pairs.length>1?'Add Clips ('+pairs.length+')':'Add Clip',
+    do(){
+      pairs.forEach(({clip})=>{
+        const t=Model.trackFor(seq,clip.trackId);
+        if(t)t.clips.push(clip);
+      });
+      Bus.emit('clips');
+    },
+    undo(){
+      pairs.forEach(({clip})=>{
+        const t=Model.trackFor(seq,clip.trackId);
+        if(t)t.clips=t.clips.filter(c=>c.id!==clip.id);
+        Engine.Audio.detachClip(clip.id);
+        S.selClips.delete(clip.id);
+      });
+      Bus.emit('clips');Bus.emit('sel');
+    }
+  });
+}
+function cmdDeleteClips(items){ // items: [{clip, trackId}]
+  const seq=Store.seq;if(!seq)return;
+  Cmd.run({
+    label:items.length>1?'Delete Clips ('+items.length+')':'Delete Clip',
+    do(){
+      items.forEach(({clip})=>{
+        const t=Model.trackFor(seq,clip.trackId);
+        if(t)t.clips=t.clips.filter(c=>c.id!==clip.id);
+        Engine.Audio.detachClip(clip.id);
+        S.selClips.delete(clip.id);
+      });
+      Bus.emit('clips');Bus.emit('sel');
+    },
+    undo(){
+      items.forEach(({clip})=>{
+        const t=Model.trackFor(seq,clip.trackId);
+        if(t&&!t.clips.some(c=>c.id===clip.id))t.clips.push(clip);
+      });
+      Bus.emit('clips');
+    }
+  });
+}
+function cmdClipProp(clipId,path,newVal,oldVal){
+  const rec=Model.clip(Store.seq,clipId);if(!rec)return;
+  const pretty=path.split('.').pop().replace(/^./,ch=>ch.toUpperCase());
+  Cmd.run({
+    label:'Edit '+pretty,
+    do(){setPath(rec.clip,path,newVal);Bus.emit('clip',clipId);},
+    undo(){setPath(rec.clip,path,oldVal);Bus.emit('clip',clipId);}
+  });
+}
+</script>

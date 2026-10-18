@@ -1,0 +1,190 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 15 BOOT: event wiring, keyboard map, autosave, init
+   ===================================================================== */
+
+/* ---------------- bus subscriptions ---------------- */
+Bus.on('assets',()=>{
+  Bin.renderTree();
+  Bin.render();
+  Panels.renderProps();
+  Shell.refreshChrome();
+});
+Bus.on('asset',()=>{
+  Bin.render();
+  Panels.renderProps();
+  TL.render();
+});
+Bus.on('sequence',()=>{
+  TL.build();
+  TL.render();
+  Panels.buildMixer();
+  Panels.renderProps();
+  Engine.Audio.rebuildBuses();
+  Engine.Audio.setTrackGains();
+  Shell.refreshChrome();
+  Compositor.applyRes();
+  Compositor.needDraw=true;
+});
+Bus.on('clips',()=>{
+  TL.render();
+  Panels.renderProps();
+  Panels.renderEC();
+  Shell.refreshChrome();
+  Compositor.needDraw=true;
+});
+Bus.on('clip',clipId=>{
+  /* live property edit: refresh the one clip element + panels + frame */
+  const item=Model.clip(Store.seq,clipId);
+  if(item){
+    const el=$('#tl-tracks .clip[data-clip="'+clipId+'"]');
+    if(el)el.classList.toggle('dis',!item.clip.enabled);
+  }
+  Panels.renderProps();
+  Panels.renderEC();
+  Compositor.needDraw=true;
+});
+Bus.on('tracks',()=>{
+  TL.syncHeaderStates();
+  Panels.syncMixerStates();
+  Engine.Audio.rebuildBuses();
+  Engine.Audio.setTrackGains();
+  Compositor.needDraw=true;
+});
+Bus.on('sel',()=>{
+  TL.syncSel();
+  Panels.renderProps();
+  Panels.renderEC();
+  Panels.selStatus();
+});
+Bus.on('time',()=>{
+  TL.updatePlayheadDOM();
+  Mon.updateTC();
+  Mon.updateScrubBar();
+  TL.followPlayhead();
+});
+Bus.on('state',()=>{
+  Mon.syncPlayButton();
+});
+Bus.on('history',()=>{
+  /* menu labels are generated on open; nothing persistent to update */
+});
+Bus.on('dirty',()=>{
+  Shell.saveStatus();
+});
+Bus.on('recents',()=>{
+  Shell.renderRecents();
+});
+
+/* ---------------- keyboard map ---------------- */
+document.addEventListener('keydown',e=>{
+  const tag=(e.target.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='select'||tag==='textarea')return;
+  if($('#modal-ov').classList.contains('show')){
+    if(e.key==='Escape')closeModal();
+    return;
+  }
+  const mod=e.ctrlKey||e.metaKey;
+  if(mod){
+    switch(e.key.toLowerCase()){
+      case 'z':e.preventDefault();e.shiftKey?Cmd.redo():Cmd.undo();return;
+      case 'y':e.preventDefault();Cmd.redo();return;
+      case 's':e.preventDefault();Shell.saveProject();return;
+      case 'i':e.preventDefault();Bin.hasImportInput();return;
+      case 'a':e.preventDefault();TL.selectAll();return;
+      default:return;
+    }
+  }
+  switch(e.key){
+    case ' ':e.preventDefault();Mon.transport('play');return;
+    case 'ArrowLeft':e.preventDefault();Playback.nudge(e.shiftKey?-10:-1);return;
+    case 'ArrowRight':e.preventDefault();Playback.nudge(e.shiftKey?10:1);return;
+    case 'Home':Playback.seek(0);return;
+    case 'End':Playback.seek(Playback.dur());return;
+    case 'Delete':
+    case 'Backspace':e.preventDefault();TL.deleteSel();return;
+    case 'Escape':closeMenu();closeModal();return;
+    case '+':case '=':TL.setZoom(TL.pps*1.35);return;
+    case '-':TL.setZoom(TL.pps/1.35);return;
+    case '\\':TL.fitSeq();return;
+  }
+  switch(e.key.toLowerCase()){
+    case 'j':Playback.shuttle(-1);return;
+    case 'k':Playback.stop();return;
+    case 'l':Playback.shuttle(1);return;
+    case 'i':TL.setIn();return;
+    case 'o':TL.setOut();return;
+    case 'm':TL.addMarker();return;
+    case 's':Shell.toggleSnap();return;
+    case 'v':setTool('select');return;
+    case 'c':setTool('razor');return;
+    case 'a':setTool('track');return;
+    case 'b':setTool('ripple');return;
+    case 'y':setTool('slip');return;
+    case 'p':setTool('pen');return;
+    case 'h':if(e.shiftKey){Shell.backToLauncher();}else setTool('hand');return;
+    case 't':setTool('type');return;
+    case 'z':setTool('zoom');return;
+  }
+});
+
+/* ---------------- launcher buttons ---------------- */
+document.addEventListener('click',e=>{
+  const nw=e.target.closest('#btn-new');
+  if(nw){Shell.newProjectModal();return;}
+  const op=e.target.closest('#btn-open');
+  if(op){const i=$('#file-open');if(i)i.click();return;}
+  const home=e.target.closest('#btn-home');
+  if(home){Shell.backToLauncher();return;}
+  const st=e.target.closest('#lk-settings');
+  if(st){Shell.seqSettingsDialog();return;}
+  const ks=e.target.closest('#lk-keys');
+  if(ks){Shell.shortcutsDialog();return;}
+});
+/* Bin.hasImportInput helper used by Ctrl+I when focus sits outside inputs */
+Bin.hasImportInput=function(){
+  const i=$('#file-import');
+  if(i)i.click();
+};
+
+/* ---------------- project file open ---------------- */
+{
+  const fo=$('#file-open');
+  if(fo)fo.addEventListener('change',()=>{
+    const f=fo.files&&fo.files[0];
+    if(f)Shell.openProjectFile(f);
+    fo.value='';
+  });
+}
+
+/* ---------------- autosave ---------------- */
+setInterval(()=>{
+  if(Store.p)Shell.autosave();
+},30000);
+window.addEventListener('beforeunload',e=>{
+  if(Store.p&&Store.dirty){
+    Recents.saveSnapshot(Store.p);
+    e.preventDefault();
+    e.returnValue='';
+  }
+});
+
+/* ---------------- init ---------------- */
+(function init(){
+  ID.init({});
+  Compositor.mount();
+  Bin.bind();
+  TL.bind();
+  Mon.bind();
+  setTool('select');
+  setWorkspace('editing');
+  Shell.renderRecents();
+  Panels.buildFx();
+  Engine.startLoop();
+  Compositor.draw(0);
+  console.log('SynapticCut '+SC.version+' (M'+SC.milestone+') — engine ready');
+})();
+</script>
+</body>
+</html>

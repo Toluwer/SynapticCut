@@ -1,0 +1,427 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 09 ENGINE: playback clock + transport, canvas compositor,
+   WebAudio mixer graph, source monitor driver, main render loop
+   ===================================================================== */
+const Engine={_raf:0};
+
+const Playback={
+  t:0,playing:false,rate:0,
+  _anchorT:0,_wall:0,_ctxAnchor:null,_active:new Set(),
+
+  fps(){return Store.fps();},
+  dur(){const s=Store.seq;return s?Model.seqDuration(s):0;},
+  loopRange(){
+    const s=Store.seq;if(!s)return[0,0];
+    const d=Math.max(Model.seqDuration(s),0.001);
+    return [s.inPoint!=null?s.inPoint:0,s.outPoint!=null?Math.min(s.outPoint,d):d];
+  },
+
+  play(rate){
+    if(!Store.seq)return;
+    Engine.Audio.ensure();
+    this.rate=rate||1;
+    this.playing=true;
+    this._anchor();
+    this._ensureActive(true);
+    Bus.emit('state');
+  },
+  stop(){
+    if(!this.playing)return;
+    this.playing=false;this.rate=0;
+    for(const id of this._active){
+      const rec=Media.clipEls.get(id);
+      if(rec)try{rec.el.pause();}catch(e){}
+    }
+    Bus.emit('state');
+  },
+  toggle(){this.playing?this.stop():this.play(1);},
+  shuttle(dir){
+    if(!this.playing||Math.sign(this.rate)!==dir)this.play(dir);
+    else{
+      const m=Math.min(4,Math.abs(this.rate)*2);
+      this.play(dir*m);
+    }
+  },
+  seek(t,snapFrame){
+    const d=this.dur();
+    if(snapFrame!==false)t=Model.frameSnap(t,this.fps());
+    this.t=clamp(t,0,Math.max(d,0));
+    this._anchor();
+    if(this.playing){this._ensureActive(true);}
+    else{this._ensureActive(false);this._parkMedia();}
+    Bus.emit('time');
+    Engine.Compositor.needDraw=true;
+  },
+  nudge(frames){this.seek(this.t+frames/this.fps());},
+
+  _anchor(){
+    this._anchorT=this.t;
+    this._wall=performance.now()/1000;
+    this._ctxAnchor=(Engine.Audio.ctx&&Engine.Audio.ctx.state==='running')?Engine.Audio.ctx.currentTime:null;
+  },
+  _now(){
+    if(!this.playing)return this.t;
+    if(this._ctxAnchor!=null&&Engine.Audio.ctx&&Engine.Audio.ctx.state==='running')
+      return this._anchorT+(Engine.Audio.ctx.currentTime-this._ctxAnchor)*this.rate;
+    return this._anchorT+(performance.now()/1000-this._wall)*this.rate;
+  },
+
+  _tick(){
+    if(!this.playing)return;
+    this.t=this._now();
+    const [ip,op]=this.loopRange();
+    if(this.rate>0&&this.t>=op){
+      if(S.loop)this.seek(ip);
+      else{this.t=op;this.stop();this._ensureActive(true);this._parkMedia();Bus.emit('time');}
+    }else if(this.rate<0&&this.t<=ip){
+      if(S.loop)this.seek(op-1/this.fps());
+      else{this.t=ip;this.stop();this._ensureActive(true);this._parkMedia();Bus.emit('time');}
+    }else{
+      this._ensureActive(false);
+      this._syncMedia();
+      Bus.emit('time');
+    }
+  },
+
+  activeClips(){
+    const s=Store.seq,m=new Map();
+    if(!s)return m;
+    for(const tr of s.tracks){
+      for(const c of tr.clips){
+        if(!c.enabled)continue;
+        if(this.t>=c.start&&this.t<Model.clipEnd(c))m.set(c.id,{c,tr});
+      }
+    }
+    return m;
+  },
+  _ensureActive(force){
+    const act=this.activeClips();
+    for(const id of [...this._active]){
+      if(!act.has(id)){
+        const rec=Media.clipEls.get(id);
+        if(rec)try{rec.el.pause();}catch(e){}
+        this._active.delete(id);
+      }
+    }
+    for(const [id,{c,tr}] of act){
+      if(!this._active.has(id)||force){
+        const rec=Media.ensureClipEl(c);
+        if(rec){
+          Engine.Audio.attachClip(c,rec.el);
+          if(this.playing)this._startEl(rec,c);
+          else this._parkOne(rec,c);
+        }
+      }
+      this._active.add(id);
+    }
+  },
+  _startEl(rec,c){
+    const el=rec.el;
+    const target=Media.clipTarget(c,this.t);
+    try{if(Math.abs(el.currentTime-target)>0.15)el.currentTime=target;}catch(e){}
+    if(this.rate<0)return;                 /* reverse: per-frame seek in _syncMedia */
+    el.playbackRate=clamp(Math.abs(this.rate),0.0625,16);
+    if(el.paused)el.play().catch(()=>{});
+  },
+  _parkOne(rec,c){
+    try{rec.el.currentTime=Media.clipTarget(c,this.t);}catch(e){}
+  },
+  _parkMedia(){
+    for(const id of this._active){
+      const rec=Media.clipEls.get(id);
+      if(rec)try{rec.el.pause();}catch(e){}
+    }
+  },
+  _syncMedia(){
+    if(!this.playing)return;
+    for(const id of this._active){
+      const rec=Media.clipEls.get(id);
+      if(!rec)continue;
+      const item=Model.clip(Store.seq,id);
+      if(!item)continue;
+      const target=Media.clipTarget(item.clip,this.t);
+      if(this.rate<0){
+        try{if(Math.abs(rec.el.currentTime-target)>0.02)rec.el.currentTime=target;}catch(e){}
+        continue;
+      }
+      try{if(Math.abs(rec.el.currentTime-target)>0.12)rec.el.currentTime=target;}catch(e){}
+    }
+  }
+};
+
+const Compositor={
+  cv:null,ctx:null,needDraw:true,
+  mount(){
+    this.cv=$('#prog-canvas');
+    this.ctx=this.cv?this.cv.getContext('2d'):null;
+  },
+  applyRes(){
+    if(!this.cv||!Store.p)return;
+    const r=S.resScale;
+    const w=Math.max(2,Math.round(Store.W()*r)),h=Math.max(2,Math.round(Store.H()*r));
+    if(this.cv.width!==w||this.cv.height!==h){this.cv.width=w;this.cv.height=h;}
+    if(S.monZoom==='Fit'){this.cv.classList.remove('pxz');this.cv.style.width='';}
+    else{this.cv.classList.add('pxz');this.cv.style.width=Math.round(Store.W()*(parseFloat(S.monZoom)/100))+'px';}
+    this.needDraw=true;
+  },
+  draw(t){
+    if(!this.ctx||!Store.p)return;
+    const W=Store.W(),H=Store.H();
+    const ctx=this.ctx;
+    ctx.setTransform(this.cv.width/W,0,0,this.cv.height/H,0,0);
+    ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+    const s=Store.seq;
+    if(!s){this._noSignal(ctx,W,H);return;}
+    const vids=s.tracks.filter(x=>x.kind==='video');
+    for(let i=vids.length-1;i>=0;i--){
+      const tr=vids[i];
+      if(!tr.visible)continue;
+      const c=tr.clips.find(x=>x.enabled&&t>=x.start&&t<Model.clipEnd(x));
+      if(c)this._drawClip(ctx,c,W,H);
+    }
+  },
+  _drawClip(ctx,c,W,H){
+    const a=Model.asset(c.assetId);
+    if(!a||a.offline)return;
+    const el=Media.elementForClip(c);
+    if(!el)return;
+    if(el.tagName==='VIDEO'&&el.readyState<2)return;
+    const ew=el.videoWidth||el.naturalWidth||el.width||0;
+    const eh=el.videoHeight||el.naturalHeight||el.height||0;
+    if(!ew||!eh)return;
+    const base=Math.min(W/ew,H/eh);
+    const sc=base*(c.transform.scale/100);
+    ctx.save();
+    ctx.globalAlpha=clamp(c.transform.opacity/100,0,1);
+    ctx.translate(W/2+c.transform.x,H/2+c.transform.y);
+    ctx.rotate(c.transform.rotation*Math.PI/180);
+    try{ctx.drawImage(el,-ew*sc/2,-eh*sc/2,ew*sc,eh*sc);}catch(e){}
+    ctx.restore();
+  },
+  _noSignal(ctx,W,H){
+    ctx.fillStyle='#0d0f11';ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#565e66';
+    ctx.font='500 '+Math.max(16,Math.round(W*0.018))+'px monospace';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('NO SEQUENCE — File > New Sequence',W/2,H/2);
+  }
+};
+
+const AudioGraph={
+  ctx:null,ready:false,
+  master:null,mSplit:null,mAnaL:null,mAnaR:null,
+  buses:new Map(),          // trackId -> {gain,anaL,anaR,split}
+  clipNodes:new Map(),      // clipId -> {src,gain,el}
+
+  ensure(){
+    if(this.ctx){
+      if(this.ctx.state==='suspended')this.ctx.resume();
+      return;
+    }
+    const AC=window.AudioContext||window.webkitAudioContext;
+    if(!AC)return;
+    this.ctx=new AC();
+    this.master=this.ctx.createGain();
+    this.mSplit=this.ctx.createChannelSplitter(2);
+    this.mAnaL=this.ctx.createAnalyser();this.mAnaL.fftSize=256;
+    this.mAnaR=this.ctx.createAnalyser();this.mAnaR.fftSize=256;
+    this.master.connect(this.ctx.destination);
+    this.master.connect(this.mSplit);
+    this.mSplit.connect(this.mAnaL,0);
+    this.mSplit.connect(this.mAnaR,1);
+    this.ready=true;
+    this.rebuildBuses();
+    this.setTrackGains();
+    /* attach elements of every clip that already has a decoder */
+    const s=Store.seq;
+    if(s)for(const tr of s.tracks)for(const c of tr.clips){
+      const rec=Media.clipEls.get(c.id);
+      if(rec)this.attachClip(c,rec.el);
+    }
+  },
+  rebuildBuses(){
+    if(!this.ctx)return;
+    const s=Store.seq;
+    const want=new Set(s?s.tracks.filter(t=>t.kind==='audio').map(t=>t.id):[]);
+    for(const id of [...this.buses.keys()]){
+      if(!want.has(id)){
+        try{this.buses.get(id).gain.disconnect();}catch(e){}
+        this.buses.delete(id);
+      }
+    }
+    for(const id of want){
+      if(!this.buses.has(id)){
+        const gain=this.ctx.createGain();
+        const split=this.ctx.createChannelSplitter(2);
+        const anaL=this.ctx.createAnalyser(),anaR=this.ctx.createAnalyser();
+        anaL.fftSize=256;anaR.fftSize=256;
+        gain.connect(this.master);
+        gain.connect(split);
+        split.connect(anaL,0);
+        split.connect(anaR,1);
+        this.buses.set(id,{gain,anaL,anaR});
+      }
+    }
+  },
+  bus(trackId){return this.buses.get(trackId)||null;},
+  attachClip(c,el){
+    if(!this.ctx)return;
+    const prev=this.clipNodes.get(c.id);
+    if(prev&&prev.el===el)return;
+    this.detachClip(c.id);
+    try{
+      const src=this.ctx.createMediaElementSource(el);
+      const gain=this.ctx.createGain();
+      src.connect(gain);
+      const bus=this.buses.get(c.trackId);
+      gain.connect(bus?bus.gain:this.master);
+      gain.gain.value=c.audio.muted?0:dbToLin(c.audio.volumeDb);
+      this.clipNodes.set(c.id,{src,gain,el});
+    }catch(e){/* element already has a source node bound elsewhere */}
+  },
+  detachClip(clipId){
+    const n=this.clipNodes.get(clipId);
+    if(n){
+      try{n.src.disconnect();n.gain.disconnect();}catch(e){}
+      this.clipNodes.delete(clipId);
+    }
+  },
+  purgeAsset(assetId){
+    for(const [cid,n] of [...this.clipNodes]){
+      if(n.el&&Media.clipEls.get(cid)&&Media.clipEls.get(cid).assetId===assetId)this.detachClip(cid);
+    }
+  },
+  setClipGain(c){
+    const n=this.clipNodes.get(c.id);
+    if(n)n.gain.gain.value=c.audio.muted?0:dbToLin(c.audio.volumeDb);
+  },
+  setTrackGains(){
+    const s=Store.seq;
+    if(!s||!this.ctx)return;
+    const anySolo=s.tracks.some(t=>t.kind==='audio'&&t.solo);
+    s.tracks.forEach(t=>{
+      if(t.kind!=='audio')return;
+      const b=this.buses.get(t.id);
+      if(!b)return;
+      const audible=(!anySolo||t.solo)&&!t.mute;
+      b.gain.gain.value=audible?dbToLin(t.gainDb||0):0;
+    });
+  },
+  meter(ana,peakHold){
+    /* returns dBFS estimate from a time-domain analyser */
+    if(!ana)return -120;
+    const n=ana.fftSize;
+    if(!ana._buf)ana._buf=new Uint8Array(n);
+    ana.getByteTimeDomainData(ana._buf);
+    let sum=0;
+    for(let i=0;i<n;i++){const v=(ana._buf[i]-128)/128;sum+=v*v;}
+    return linToDb(Math.sqrt(sum/n));
+  }
+};
+
+Engine.Playback=Playback;
+Engine.Compositor=Compositor;
+Engine.Audio=AudioGraph;
+
+const Source={
+  assetId:null,el:null,_rafSeen:0,
+  open(assetId){
+    const a=Model.asset(assetId);
+    if(!a)return;
+    if(a.offline){action('Media offline — relink '+a.name+' first');return;}
+    this.stop();
+    this.assetId=assetId;
+    const rec=Media.assetEls.get(assetId);
+    this.el=rec?(rec.el.tagName==='VIDEO'||rec.el.tagName==='AUDIO'?rec.el:null):null;
+    S.srcTab='source';S.srcAssetId=assetId;
+    Mon.syncTabs();
+    this.resizeCanvas();
+    this.drawFrame();
+    action('Opened '+a.name+' in Source monitor');
+  },
+  clear(){
+    this.stop();
+    this.assetId=null;this.el=null;
+    S.srcAssetId=null;
+    if(S.srcTab==='source')Mon.syncTabs();
+  },
+  toggle(){this.el?(this.el.paused?this.el.play().catch(()=>{}):this.el.pause()):null;},
+  seekFrac(f){
+    if(!this.el||!isFinite(this.el.duration))return;
+    this.el.currentTime=clamp(f,0,0.999)*this.el.duration;
+    this.drawFrame();
+  },
+  nudge(frames){
+    if(!this.el)return;
+    this.el.currentTime=clamp(this.el.currentTime+frames/Store.fps(),0,this.el.duration||0);
+    this.drawFrame();
+  },
+  stop(){if(this.el)try{this.el.pause();}catch(e){}},
+  resizeCanvas(){
+    const cv=$('#src-canvas');
+    if(!cv)return;
+    if(this.el&&(this.el.videoWidth||this.el.tagName==='AUDIO')){
+      cv.width=this.el.videoWidth||1600;
+      cv.height=this.el.videoHeight||900;
+    }else{
+      const a=Model.asset(this.assetId);
+      const el=a?Media.elementForAsset(this.assetId):null;
+      const w=el?(el.naturalWidth||el.width||1600):1600;
+      const h=el?(el.naturalHeight||el.height||900):900;
+      cv.width=w;cv.height=h;
+    }
+  },
+  drawFrame(){
+    const cv=$('#src-canvas');
+    if(!cv||S.srcTab!=='source'||!this.assetId)return;
+    const ctx=cv.getContext('2d');
+    const a=Model.asset(this.assetId);
+    if(!a)return;
+    ctx.fillStyle='#000';ctx.fillRect(0,0,cv.width,cv.height);
+    if(a.kind==='audio'||a.kind==='tone'){
+      /* audio: render a live slice of the waveform around the playhead */
+      Media.drawWave(cv,a,clamp((this.el?this.el.currentTime:0)-3,0,Math.max(0,a.duration-6)||0),Math.min(6,a.duration),cv.width,cv.height);
+      if(this.el){
+        ctx.fillStyle='rgba(232,238,244,.9)';
+        const x=(this.el.currentTime/(this.el.duration||1))*cv.width;
+        ctx.fillRect(x,0,1,cv.height);
+      }
+      return;
+    }
+    const el=this.el||Media.elementForAsset(this.assetId);
+    if(!el)return;
+    try{
+      if(el.tagName==='VIDEO'){
+        if(el.readyState>=2)ctx.drawImage(el,0,0,cv.width,cv.height);
+      }else if(el.naturalWidth||el.width){
+        const ew=el.naturalWidth||el.width,eh=el.naturalHeight||el.height;
+        ctx.drawImage(el,0,0,ew,eh,0,0,cv.width,cv.height);
+      }
+    }catch(e){}
+  },
+  tick(){
+    if(S.srcTab!=='source')return;
+    if(this.el&&!this.el.paused)this.drawFrame();
+    Mon.updateSourceTC();
+  }
+};
+Engine.Source=Source;
+
+/* ---------------- main loop ---------------- */
+Engine.startLoop=function(){
+  if(this._raf)return;
+  const step=()=>{
+    try{
+      Playback._tick();
+      if(Playback.playing){Compositor.draw(Playback.t);Compositor.needDraw=false;}
+      else if(Compositor.needDraw){Compositor.draw(Playback.t);Compositor.needDraw=false;}
+      Source.tick();
+      Panels.tickMeters();
+    }catch(err){console.error('loop:',err);}
+    this._raf=requestAnimationFrame(step);
+  };
+  this._raf=requestAnimationFrame(step);
+};
+</script>

@@ -1,5 +1,6 @@
 <body>
 
+<div id="sc-root">
 <div id="tooltip"><span class="tt-t"></span><span class="tt-k"></span></div>
 <div id="menu-pop"></div>
 
@@ -18,52 +19,11 @@
       <button class="lc-open" id="btn-open">Open Project…</button>
     </div>
     <div class="lc-sec">Recent Projects</div>
-    <div class="lc-list">
-      <div class="lp-item first" data-open-project="1">
-        <div class="lp-ic">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 7.5h11M5.5 2.5v3M10.5 2.5v3"/></svg>
-        </div>
-        <div class="lp-main">
-          <div class="lp-name">Mountain_Documentary — Act II</div>
-          <div class="lp-meta">/Volumes/Projects_2025/Kystfilm/Mountain_Documentary/Mountain_Documentary.pcut</div>
-        </div>
-        <div class="lp-side"><div class="lp-when">Today · 09:14</div><div class="lp-size">4.2 GB</div></div>
-      </div>
-      <div class="lp-item" data-open-project="1">
-        <div class="lp-ic">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 7.5h11M5.5 2.5v3M10.5 2.5v3"/></svg>
-        </div>
-        <div class="lp-main">
-          <div class="lp-name">Harbor_Nights_Short</div>
-          <div class="lp-meta">/Volumes/Projects_2025/Kystfilm/Harbor_Nights/Harbor_Nights_Short.pcut</div>
-        </div>
-        <div class="lp-side"><div class="lp-when">Oct 15 · 16:48</div><div class="lp-size">1.8 GB</div></div>
-      </div>
-      <div class="lp-item" data-open-project="1">
-        <div class="lp-ic">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 7.5h11M5.5 2.5v3M10.5 2.5v3"/></svg>
-        </div>
-        <div class="lp-main">
-          <div class="lp-name">Nordic_Kitchen_S01</div>
-          <div class="lp-meta">/Volumes/Projects_2025/Broadcast/Nordic_Kitchen/Nordic_Kitchen_S01.pcut</div>
-        </div>
-        <div class="lp-side"><div class="lp-when">Oct 9 · 11:02</div><div class="lp-size">12.6 GB</div></div>
-      </div>
-      <div class="lp-item" data-open-project="1">
-        <div class="lp-ic">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 7.5h11M5.5 2.5v3M10.5 2.5v3"/></svg>
-        </div>
-        <div class="lp-main">
-          <div class="lp-name">Archival_Restoration_1920s</div>
-          <div class="lp-meta">/Volumes/Archive_02/NFF/Archival_Restoration/Archival_Restoration_1920s.pcut</div>
-        </div>
-        <div class="lp-side"><div class="lp-when">Sep 28 · 14:20</div><div class="lp-size">27.9 GB</div></div>
-      </div>
-    </div>
+    <div class="lc-list" id="lc-recent-list"></div>
     <div class="lc-foot">
-      <span>Workgroup: <span style="color:var(--txt-2)">kystfilm-post</span></span>
-      <span class="lk" data-tip="Project Settings">Settings…</span>
-      <span class="lk" data-tip="Keyboard Shortcuts">Keyboard Shortcuts…</span>
+      <span>Runs entirely in this browser · nothing is uploaded</span>
+      <span class="lk" id="lk-settings" data-tip="Project Settings">Settings…</span>
+      <span class="lk" id="lk-keys" data-tip="Keyboard Shortcuts">Keyboard Shortcuts…</span>
       <span class="ver">0.1.0 · Milestone 1</span>
     </div>
   </div>
@@ -88,7 +48,7 @@
       <button class="menu-btn" data-menu="help">Help</button>
     </nav>
     <div class="tb-mid">
-      <div id="tb-project"><b>Mountain_Documentary</b> · Sequences / Act_II_Master</div>
+      <div id="tb-project"><b id="tb-proj-name">—</b> · <span id="tb-seq-path">—</span></div>
     </div>
     <div class="tb-right">
       <div id="ws-tabs">
@@ -172,18 +132,23 @@
 
   <footer id="statusbar">
     <div id="status-left">
-      <span>Mercury Playback Engine GPU Acceleration (CUDA)</span>
+      <span>SynapticCut Engine · Canvas Compositor · WebAudio</span>
       <span class="sb-sep"></span>
-      <span>Sequence: <span style="color:var(--txt-2)">Act_II_Master</span> · 3840×2160 · 23.976 fps</span>
+      <span id="sb-seq">No sequence</span>
       <span id="status-action"></span>
     </div>
     <div id="status-right">
-      <span>V1 · <span style="color:var(--txt-2)">Interview_Marta_Closeup</span></span>
-      <span class="sb-sep"></span>
-      <span>In 00:00:12:00 · Out 00:00:47:00</span>
+      <span id="sb-sel">No selection</span>
     </div>
   </footer>
 </div>
+
+<!-- ================= DIALOG / DRAG GHOST / HIDDEN INPUTS ================= -->
+<div id="modal-ov"><div class="scm-card" id="modal-card"></div></div>
+<div id="drag-ghost"><span class="tchip"></span><span class="dg-name"></span></div>
+<input type="file" id="file-import" class="hide" multiple="multiple" accept="video/*,audio/*,image/*">
+<input type="file" id="file-open" class="hide" accept=".json,application/json">
+<input type="file" id="file-relink" class="hide" accept="video/*,audio/*,image/*">
 
 <!-- ================= PANEL STORE ================= -->
 <div id="panel-store" class="hide">

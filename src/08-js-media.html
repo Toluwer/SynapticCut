@@ -1,0 +1,411 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 08 MEDIA: import, probing, thumbnails, waveform peaks,
+   generators (color bars / test tone / color matte), element registry
+   ===================================================================== */
+const Media={
+  assetEls:new Map(),   // assetId -> {el, url}   (source preview + stills)
+  clipEls:new Map(),    // clipId -> {el, url, assetId} (per-clip A/V decoders)
+  _decodeCtx:null,
+
+  /* ---------------- import ---------------- */
+  kindForFile(file){
+    const t=file.type||'';
+    if(t.startsWith('video/'))return 'video';
+    if(t.startsWith('audio/'))return 'audio';
+    if(t.startsWith('image/'))return 'image';
+    const ext=(file.name.split('.').pop()||'').toLowerCase();
+    if(['mp4','mov','webm','mkv','m4v','avi','ogv'].includes(ext))return 'video';
+    if(['mp3','wav','aif','aiff','m4a','ogg','flac','aac'].includes(ext))return 'audio';
+    if(['png','jpg','jpeg','gif','webp','svg','bmp','tiff'].includes(ext))return 'image';
+    return null;
+  },
+  async importFiles(files){
+    const imported=[];
+    for(const file of files){
+      const kind=this.kindForFile(file);
+      if(!kind){action('Unsupported file: '+file.name);continue;}
+      const asset={
+        id:ID.next('asset'),
+        name:file.name.replace(/\.[^.]+$/,''),
+        kind,binId:kind==='audio'?'audio':(kind==='image'?'graphics':'footage'),
+        fileName:file.name,fileSize:file.size,fileType:file.type,
+        offline:false,thumb:null,peaks:null,duration:5,
+        meta:{}
+      };
+      try{
+        if(kind==='video')await this._probeVideo(asset,file);
+        else if(kind==='audio')await this._probeAudio(asset,file);
+        else await this._probeImage(asset,file);
+        imported.push(asset);
+        action('Imported '+asset.name);
+      }catch(err){
+        console.error('import failed:',file.name,err);
+        action('Could not import '+file.name);
+      }
+    }
+    if(imported.length){
+      cmdAddAssets(imported);
+      Recents.touch(Store.p.id,Store.p.name);
+    }
+    return imported;
+  },
+  async _probeVideo(asset,file){
+    const url=URL.createObjectURL(file);
+    const el=document.createElement('video');
+    el.preload='auto';el.muted=true;el.src=url;
+    await this._once(el,'loadedmetadata',15000);
+    if(!isFinite(el.duration)||el.duration<=0)throw new Error('bad duration');
+    asset.duration=el.duration;
+    asset.meta={
+      width:el.videoWidth,height:el.videoHeight,
+      fps:await this._guessFps(el),
+      hasAudio:this._hasAudio(el)
+    };
+    asset.thumb=await this._videoThumb(el);
+    this.assetEls.set(asset.id,{el,url});
+  },
+  async _probeAudio(asset,file){
+    const url=URL.createObjectURL(file);
+    const buf=await this._decode(url);
+    asset.duration=buf.duration;
+    asset.meta={sampleRate:buf.sampleRate,channels:buf.numberOfChannels,hasAudio:true};
+    asset.peaks=this._peaksFromBuffer(buf,100);
+    const el=new Audio();
+    el.preload='auto';el.src=url;
+    this.assetEls.set(asset.id,{el,url});
+  },
+  async _probeImage(asset,file){
+    const url=URL.createObjectURL(file);
+    const el=new Image();
+    el.src=url;
+    await this._once(el,'load',15000);
+    asset.duration=Store.p?Store.p.settings.stillDuration:5;
+    asset.meta={width:el.naturalWidth,height:el.naturalHeight};
+    asset.thumb=this._imgThumb(el);
+    this.assetEls.set(asset.id,{el,url});
+  },
+  _once(el,ev,timeout){
+    return new Promise((res,rej)=>{
+      const to=setTimeout(()=>{clean();rej(new Error('timeout waiting for '+ev));},timeout||15000);
+      const ok=()=>{clean();res();};
+      const bad=()=>{clean();rej(new Error('media error'));};
+      function clean(){clearTimeout(to);el.removeEventListener(ev,ok);el.removeEventListener('error',bad);}
+      el.addEventListener(ev,ok,{once:true});
+      el.addEventListener('error',bad,{once:true});
+    });
+  },
+  _hasAudio(el){
+    if(typeof el.mozHasAudio==='boolean')return el.mozHasAudio;
+    if(el.webkitAudioDecodedByteCount>0)return true;
+    if(el.audioTracks&&el.audioTracks.length>0)return true;
+    return true; /* assume audible; most browser decoders expose no signal here */
+  },
+  async _guessFps(el){
+    try{
+      if(!el.requestVideoFrameCallback)return null;
+      const samples=[];
+      await new Promise(res=>{
+        let done=false;
+        const finish=()=>{if(!done){done=true;el.pause();res();}};
+        const cb=(now,meta)=>{
+          samples.push(meta.mediaTime);
+          if(samples.length>=14||elapsed()>420)return finish();
+          el.requestVideoFrameCallback(cb);
+        };
+        const t0=performance.now();
+        const elapsed=()=>performance.now()-t0;
+        el.currentTime=0;
+        el.muted=true;
+        el.play().then(()=>{el.requestVideoFrameCallback(cb);}).catch(finish);
+        setTimeout(finish,480);
+      });
+      el.pause();
+      if(samples.length<4)return null;
+      const deltas=[];
+      for(let i=1;i<samples.length;i++){
+        const d=samples[i]-samples[i-1];
+        if(d>1/130&&d<1/10)deltas.push(d);
+      }
+      if(deltas.length<3)return null;
+      deltas.sort((a,b)=>a-b);
+      const med=deltas[Math.floor(deltas.length/2)];
+      const fps=1/med;
+      const std=[23.976,24,25,29.97,30,48,50,59.94,60,120];
+      for(const f of std)if(Math.abs(fps-f)/f<0.03)return f;
+      return Math.round(fps*100)/100;
+    }catch(e){return null;}
+  },
+  async _videoThumb(el){
+    try{
+      const t=Math.min(0.5,(el.duration||1)/2);
+      el.currentTime=t;
+      await this._once(el,'seeked',6000);
+      const cv=document.createElement('canvas');
+      cv.width=192;cv.height=108;
+      const ctx=cv.getContext('2d');
+      const w=el.videoWidth||16,h=el.videoHeight||9;
+      const s=Math.min(192/w,108/h);
+      ctx.fillStyle='#000';ctx.fillRect(0,0,192,108);
+      ctx.drawImage(el,(192-w*s)/2,(108-h*s)/2,w*s,h*s);
+      return cv.toDataURL('image/jpeg',0.62);
+    }catch(e){return null;}
+  },
+  _imgThumb(el){
+    try{
+      const cv=document.createElement('canvas');
+      cv.width=192;cv.height=108;
+      const ctx=cv.getContext('2d');
+      const w=el.naturalWidth||16,h=el.naturalHeight||9;
+      const s=Math.min(192/w,108/h);
+      ctx.fillStyle='#000';ctx.fillRect(0,0,192,108);
+      ctx.drawImage(el,(192-w*s)/2,(108-h*s)/2,w*s,h*s);
+      return cv.toDataURL('image/jpeg',0.62);
+    }catch(e){return null;}
+  },
+  _decode(url){
+    if(!this._decodeCtx){
+      const AC=window.AudioContext||window.webkitAudioContext;
+      if(!AC)return Promise.reject(new Error('no audio support'));
+      this._decodeCtx=new AC();
+    }
+    return fetch(url)
+      .then(r=>r.arrayBuffer())
+      .then(b=>this._decodeCtx.decodeAudioData(b));
+  },
+  _peaksFromBuffer(buf,hz){
+    const ch=buf.getChannelData(0);
+    const n=Math.max(1,Math.floor(buf.duration*hz));
+    const min=new Array(n),max=new Array(n);
+    const step=ch.length/n;
+    for(let i=0;i<n;i++){
+      let mn=1,mx=-1;
+      const s=Math.floor(i*step),e=Math.min(ch.length,Math.floor((i+1)*step)+1);
+      for(let j=s;j<e;j++){const v=ch[j];if(v<mn)mn=v;if(v>mx)mx=v;}
+      min[i]=mn;max[i]=mx;
+    }
+    return {min,max,hz};
+  },
+
+  /* ---------------- runtime elements ---------------- */
+  elementForAsset(assetId){const r=this.assetEls.get(assetId);return r?r.el:null;},
+  elementForClip(clip){
+    const a=Model.asset(clip.assetId);
+    if(!a||a.offline)return null;
+    if(a.kind==='image'||a.kind==='matte'||a.kind==='bars')return this.elementForAsset(a.id);
+    const rec=this.clipEls.get(clip.id);
+    return rec?rec.el:null;
+  },
+  /* ensure a decodable element exists for an A/V clip (one decoder per clip) */
+  ensureClipEl(clip){
+    const a=Model.asset(clip.assetId);
+    if(!a||a.offline)return null;
+    if(a.kind!=='video'&&a.kind!=='audio'&&a.kind!=='tone')return null;
+    const srcTok=a._srcId||null;
+    let rec=this.clipEls.get(clip.id);
+    if(rec&&rec.src===srcTok)return rec;
+    if(rec){Engine.Audio.detachClip(clip.id);try{rec.el.pause();}catch(e){}
+      if(rec.url)URL.revokeObjectURL(rec.url);
+      this.clipEls.delete(clip.id);
+    }
+    let el,url=null;
+    if(a.kind==='tone'){
+      /* tone assets regenerate their element from the same deterministic WAV */
+      const gen=this._toneBlob(a);
+      url=URL.createObjectURL(gen.blob);
+      el=new Audio();el.preload='auto';el.src=url;
+    }else{
+      const src=this.assetEls.get(a.id);
+      if(!src)return null;
+      el=a.kind==='video'?document.createElement('video'):new Audio();
+      el.preload='auto';el.muted=false;el.crossOrigin='anonymous';
+      el.src=src.url;
+      url=src.url;
+    }
+    rec={el,url,assetId:a.id,src:srcTok};
+    this.clipEls.set(clip.id,rec);
+    return rec;
+  },
+  dropClipEl(clipId){
+    const rec=this.clipEls.get(clipId);
+    if(rec){
+      Engine.Audio.detachClip(clipId);
+      try{rec.el.pause();}catch(e){}
+      if(rec.url&&rec.url.startsWith('blob:'))URL.revokeObjectURL(rec.url);
+      this.clipEls.delete(clipId);
+    }
+  },
+  clipTarget(clip,t){return clip.inPoint+(t-clip.start);},
+
+  /* ---------------- waveform rendering ---------------- */
+  drawWave(canvas,asset,inPoint,dur,pxW,pxH){
+    const ctx=canvas.getContext('2d');
+    canvas.width=Math.max(2,Math.min(6000,Math.round(pxW)));
+    canvas.height=Math.max(8,Math.round(pxH));
+    const W=canvas.width,H=canvas.height;
+    ctx.clearRect(0,0,W,H);
+    if(!asset||!asset.peaks)return;
+    const {min,max,hz}=asset.peaks;
+    ctx.fillStyle='rgba(127,182,148,.34)';
+    ctx.strokeStyle='rgba(127,182,148,.72)';
+    ctx.lineWidth=1;
+    const mid=H/2,amp=H/2-1;
+    ctx.beginPath();
+    for(let x=0;x<W;x++){
+      const t0=inPoint+(x/W)*dur,t1=inPoint+((x+1)/W)*dur;
+      const i0=clamp(Math.floor(t0*hz),0,min.length-1);
+      const i1=clamp(Math.ceil(t1*hz),i0+1,min.length);
+      let mn=1,mx=-1;
+      for(let i=i0;i<i1;i++){if(min[i]<mn)mn=min[i];if(max[i]>mx)mx=max[i];}
+      if(mn>mx){mn=0;mx=0;}
+      const y1=mid-mx*amp,y2=mid-mn*amp;
+      ctx.rect(x,y1,1,Math.max(1,y2-y1));
+    }
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(0,mid+.5);ctx.lineTo(W,mid+.5);
+    ctx.stroke();
+  },
+
+  /* ---------------- generators (real, deterministic) ---------------- */
+  makeBars(p){
+    const a={id:ID.next('asset'),name:'Color_Bars',kind:'bars',duration:10,binId:'generators',
+      offline:false,fileName:null,fileSize:574048,fileType:'generated',thumb:null,peaks:null,
+      meta:{width:1920,height:1080}};
+    this.regen(a);Model.addAsset(p,a);return a;
+  },
+  makeMatte(p,color,name){
+    const a={id:ID.next('asset'),name:name||'Color_Matte',kind:'matte',duration:10,binId:'generators',
+      offline:false,fileName:null,fileSize:8294400,fileType:'generated',thumb:null,peaks:null,
+      meta:{width:1920,height:1080,color:color||'#3d5c83'}};
+    this.regen(a);Model.addAsset(p,a);return a;
+  },
+  makeTone(p,dur){
+    const a={id:ID.next('asset'),name:'Tone_1kHz',kind:'tone',duration:dur||30,binId:'generators',
+      offline:false,fileName:null,fileSize:0,fileType:'generated',thumb:null,peaks:null,
+      meta:{sampleRate:48000,channels:2,freq:1000}};
+    const gen=this._toneData(a);
+    a.fileSize=gen.blob.size;
+    a.peaks=gen.peaks;
+    this.regen(a);Model.addAsset(p,a);return a;
+  },
+  regen(a){ /* (re)create runtime element for generator / synthetic assets */
+    if(a.kind==='bars'){
+      this.assetEls.set(a.id,{el:this._barsCanvas(),url:null});
+      a.meta.width=1920;a.meta.height=1080;
+    }else if(a.kind==='matte'){
+      this.assetEls.set(a.id,{el:this._matteCanvas(a.meta.color),url:null});
+      a.meta.width=1920;a.meta.height=1080;
+    }else if(a.kind==='tone'){
+      const gen=this._toneData(a);
+      const url=URL.createObjectURL(gen.blob);
+      const el=new Audio();el.preload='auto';el.src=url;
+      this.assetEls.set(a.id,{el,url});
+      a.peaks=gen.peaks;
+      a.meta.sampleRate=48000;a.meta.channels=2;
+    }
+  },
+  _barsCanvas(){
+    const cv=document.createElement('canvas');
+    cv.width=1920;cv.height=1080;
+    const c=cv.getContext('2d');
+    const cw=1920/7;
+    /* 75% amplitude color bars - top 62% */
+    const cols=['#b4b4b4','#b4b410','#10b4b4','#10b410','#b410b4','#b41010','#1010b4'];
+    cols.forEach((col,i)=>{c.fillStyle=col;c.fillRect(Math.floor(i*cw),0,Math.ceil(cw)+1,672);});
+    /* reverse chroma strip - aligned to the same 7-column grid */
+    const rc=['#1010b4','#b410b4','#101010','#b41010','#10b4b4','#101010','#b4b4b4'];
+    rc.forEach((col,i)=>{c.fillStyle=col;c.fillRect(Math.floor(i*cw),672,Math.ceil(cw)+1,86);});
+    /* Y-ramp + pluge - bottom, 7 equal segments aligned to the grid */
+    const g=[0,42,84,126,168,210,235];
+    const y0=758;
+    g.forEach((v,i)=>{
+      const s='rgb('+v+','+v+','+v+')';
+      c.fillStyle=s;
+      c.fillRect(Math.floor(i*cw),y0,Math.ceil(cw)+1,1080-y0);
+    });
+    /* pluge triplet inside the last segment */
+    const px=Math.floor(6*cw);
+    c.fillStyle='#050505';c.fillRect(px+40,y0+120,120,320);
+    c.fillStyle='#131313';c.fillRect(px+170,y0+120,120,320);
+    c.fillStyle='#252525';c.fillRect(px+300,y0+120,120,320);
+    return cv;
+  },
+  _matteCanvas(color){
+    const cv=document.createElement('canvas');
+    cv.width=1920;cv.height=1080;
+    const c=cv.getContext('2d');
+    c.fillStyle=color||'#3d5c83';
+    c.fillRect(0,0,1920,1080);
+    return cv;
+  },
+  _toneData(a){
+    const sr=48000,freq=(a.meta&&a.meta.freq)||1000;
+    const dur=a.duration||30;
+    const n=Math.floor(dur*sr);
+    const L=new Float32Array(n),R=new Float32Array(n);
+    const fade=Math.floor(sr*0.01);
+    for(let i=0;i<n;i++){
+      const env=Math.min(1,i/fade,(n-i)/fade);
+      const s=Math.sin(2*Math.PI*freq*i/sr)*0.4*env;
+      L[i]=s;R[i]=s;
+    }
+    return {blob:this._wavBlob(L,R,sr),peaks:this._peaksFromSamples(L,100)};
+  },
+  _toneBlob(a){return this._toneData(a);},
+  _peaksFromSamples(ch,hz){
+    const n=Math.max(1,Math.floor((ch.length/48000)*hz));
+    const min=new Array(n),max=new Array(n);
+    const step=ch.length/n;
+    for(let i=0;i<n;i++){
+      let mn=1,mx=-1;
+      const s=Math.floor(i*step),e=Math.min(ch.length,Math.floor((i+1)*step)+1);
+      for(let j=s;j<e;j++){const v=ch[j];if(v<mn)mn=v;if(v>mx)mx=v;}
+      min[i]=mn;max[i]=mx;
+    }
+    return {min,max,hz};
+  },
+  _wavBlob(L,R,sr){
+    const nCh=2,bps=2,nFrames=L.length;
+    const blockAlign=nCh*bps,dataLen=nFrames*blockAlign;
+    const buf=new ArrayBuffer(44+dataLen);
+    const v=new DataView(buf);
+    const wstr=(off,s)=>{for(let i=0;i<s.length;i++)v.setUint8(off+i,s.charCodeAt(i));};
+    wstr(0,'RIFF');v.setUint32(4,36+dataLen,true);wstr(8,'WAVE');
+    wstr(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,nCh,true);
+    v.setUint32(24,sr,true);v.setUint32(28,sr*blockAlign,true);v.setUint16(32,blockAlign,true);v.setUint16(34,16,true);
+    wstr(36,'data');v.setUint32(40,dataLen,true);
+    let off=44;
+    for(let i=0;i<nFrames;i++){
+      v.setInt16(off,clamp(L[i],-1,1)*32767,true);off+=2;
+      v.setInt16(off,clamp(R[i],-1,1)*32767,true);off+=2;
+    }
+    return new Blob([buf],{type:'audio/wav'});
+  },
+
+  /* ---------------- relink ---------------- */
+  async relink(assetId,file){
+    const a=Model.asset(assetId);
+    if(!a)return;
+    const kind=this.kindForFile(file);
+    if(kind!==a.kind){action('Relink failed: '+file.name+' is not '+a.kind+' media');return;}
+    try{
+      a.offline=false;
+      if(kind==='video')await this._probeVideo(a,file);
+      else if(kind==='audio')await this._probeAudio(a,file);
+      else await this._probeImage(a,file);
+      a._srcId=ID.next('src');
+      /* force per-clip decoders to be rebuilt with the new source */
+      const dead=[...this.clipEls.entries()].filter(([cid,rec])=>rec.assetId===assetId);
+      dead.forEach(([cid])=>this.dropClipEl(cid));
+      Store.setDirty(true);
+      Bus.emit('asset',assetId);Bus.emit('clips');
+      action('Relinked '+a.name);
+    }catch(err){
+      a.offline=true;
+      action('Relink failed for '+a.name);
+    }
+  }
+};
+</script>

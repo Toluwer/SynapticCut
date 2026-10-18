@@ -1,0 +1,468 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 10 UI SHELL: tooltips, menus, workspaces, tools,
+   launcher (real recents), dialogs, menubar wiring, project save/open
+   ===================================================================== */
+
+/* ================= TOOLTIPS ================= */
+let ttEl=null,ttTimer=null;
+document.addEventListener('mouseover',e=>{
+  const t=e.target.closest('[data-tip]');
+  if(t===ttEl)return;
+  clearTimeout(ttTimer);hideTip();
+  if(!t)return;
+  ttEl=t;
+  ttTimer=setTimeout(()=>{
+    const tip=$('#tooltip');
+    if(!tip)return;
+    tip.querySelector('.tt-t').textContent=t.dataset.tip;
+    const k=t.dataset.key;
+    tip.querySelector('.tt-k').textContent=k||'';
+    tip.querySelector('.tt-k').style.display=k?'':'none';
+    tip.classList.add('show');
+    const r=t.getBoundingClientRect(),tr=tip.getBoundingClientRect();
+    let x=r.left+r.width/2-tr.width/2;
+    x=Math.max(6,Math.min(x,innerWidth-tr.width-6));
+    let y=r.top-tr.height-7;
+    if(y<44)y=r.bottom+7;
+    tip.style.left=x+'px';tip.style.top=y+'px';
+  },300);
+});
+document.addEventListener('mousedown',hideTip);
+function hideTip(){clearTimeout(ttTimer);const t=$('#tooltip');if(t)t.classList.remove('show');ttEl=null;}
+
+/* ================= MENU SYSTEM ================= */
+const POP=()=>$('#menu-pop');
+function openMenu(anchor,items,x,y){
+  const P=POP();if(!P)return;
+  P.innerHTML='';
+  items.forEach(it=>{
+    if(it.sep){
+      const d=document.createElement('div');
+      d.style.cssText='height:1px;background:#33383d;margin:3px 8px';
+      P.appendChild(d);return;
+    }
+    const r=document.createElement('div');
+    r.className='mi'+(it.dis?' dis':'');
+    let inner='';
+    if(it.chk!==undefined){const on=!!it.chk();inner+='<span class="mi-chk">'+(on?'✓':'')+'</span>';}
+    inner+='<span>'+it.t+'</span>'+
+      (it.k?'<span class="mi-k">'+it.k+'</span>':'')+
+      (it.sub?'<span class="mi-sub">▶</span>':'');
+    r.innerHTML=inner;
+    r.addEventListener('click',()=>{if(it.act&&!it.dis)it.act();closeMenu();});
+    P.appendChild(r);
+  });
+  P.classList.add('show');
+  const pr=anchor?anchor.getBoundingClientRect():{left:x||0,top:y||0,bottom:(y||0)+20};
+  let px=x!==undefined?x:pr.left,py=y!==undefined?y:pr.bottom+3;
+  if(px+P.offsetWidth>innerWidth-8)px=Math.max(8,px-P.offsetWidth);
+  if(py+P.offsetHeight>innerHeight-8)py=Math.max(8,py-P.offsetHeight-20);
+  P.style.left=px+'px';P.style.top=py+'px';
+}
+function closeMenu(){
+  const P=POP();
+  if(P)P.classList.remove('show');
+  $$('.menu-btn.open').forEach(b=>b.classList.remove('open'));
+}
+document.addEventListener('mousedown',e=>{
+  const P=POP();
+  if(!P||!P.classList.contains('show'))return;
+  if(P.contains(e.target))return;
+  if(e.target.closest('.menu-btn,.mres,.icb,.tbtn,.tlt'))return;
+  closeMenu();
+});
+
+/* ================= WORKSPACE SWITCH ================= */
+const LAYOUTS={
+  editing:{bin:'#slot-e-bin',monitor:'#slot-e-mon',props:'#slot-e-props',timeline:'#slot-e-tl'},
+  effects:{monitor:'#slot-f-mon',fx:'#slot-f-fx',ec:'#slot-f-ec',timeline:'#slot-f-tl'},
+  audio:{monitor:'#slot-a-mon',mixer:'#slot-a-mix',timeline:'#slot-a-tl'},
+  color:{monitor:'#slot-c-mon',color:'#slot-c-col',timeline:'#slot-c-tl'}
+};
+function setWorkspace(id){
+  S.ws=id;
+  $$('.ws').forEach(w=>w.classList.toggle('on',w.id==='ws-'+id));
+  $$('.ws-tab').forEach(t=>t.classList.toggle('on',t.dataset.ws===id));
+  const L=LAYOUTS[id];
+  if(L)Object.entries(L).forEach(([key,sel])=>{
+    const slot=$(sel),panel=$('#panel-'+key);
+    if(slot&&panel&&slot!==panel.parentNode)slot.appendChild(panel);
+  });
+  requestAnimationFrame(()=>{
+    TL.render();
+    Panels.buildMixer();
+    Compositor.applyRes();
+    Compositor.needDraw=true;
+  });
+}
+document.addEventListener('click',e=>{
+  const t=e.target.closest('.ws-tab');
+  if(t)setWorkspace(t.dataset.ws);
+});
+
+/* ================= TOOL SELECTION ================= */
+const TOOL_NAMES={select:'Selection',track:'Track Select',razor:'Razor',ripple:'Ripple Edit',
+  slip:'Slip',pen:'Pen',hand:'Hand',type:'Type',zoom:'Zoom'};
+function setTool(id){
+  S.tool=id;
+  $$('.tool').forEach(b=>b.classList.toggle('on',b.dataset.tool===id));
+  $$('.tlt[data-tool]').forEach(b=>b.classList.toggle('on',b.dataset.tool===id));
+  const n=$('#tool-note');if(n)n.textContent=TOOL_NAMES[id]||id;
+}
+document.addEventListener('click',e=>{
+  const b=e.target.closest('#toolbar .tool');
+  if(b)setTool(b.dataset.tool);
+  const snap=e.target.closest('#tb-snap');
+  if(snap)Shell.toggleSnap();
+  const tsnap=e.target.closest('#tl-snap');
+  if(tsnap)Shell.toggleSnap();
+  const tlt=e.target.closest('.tlt[data-tool]');
+  if(tlt)setTool(tlt.dataset.tool);
+});
+
+/* ================= DIALOGS ================= */
+function openModal(title,bodyHTML,buttons){
+  const card=$('#modal-card');
+  if(!card)return;
+  card.innerHTML='<div class="scm-h">'+title+'</div><div class="scm-b">'+bodyHTML+'</div>'+
+    '<div class="scm-f"></div>';
+  const f=card.querySelector('.scm-f');
+  (buttons||[{t:'Close'}]).forEach(b=>{
+    const el=document.createElement('button');
+    el.className=b.pri?'btn-pri':'tbtn';
+    el.style.flex='none';el.style.height='24px';
+    el.textContent=b.t;
+    el.addEventListener('click',()=>{closeModal();if(b.act)b.act();});
+    f.appendChild(el);
+  });
+  $('#modal-ov').classList.add('show');
+  const inp=card.querySelector('input,select');
+  if(inp)setTimeout(()=>{inp.focus();if(inp.select)inp.select();},30);
+}
+function closeModal(){const ov=$('#modal-ov');if(ov)ov.classList.remove('show');}
+document.addEventListener('mousedown',e=>{
+  const ov=$('#modal-ov');
+  if(ov&&ov.classList.contains('show')&&!e.target.closest('.scm-card'))closeModal();
+});
+
+/* ================= SHELL (launcher, project lifecycle, chrome) ================= */
+const Shell={
+  /* ---------- launcher ---------- */
+  renderRecents(){
+    const list=$('#lc-recent-list');
+    if(!list)return;
+    const items=Recents.list();
+    list.innerHTML='';
+    if(!items.length){
+      list.innerHTML='<div class="lp-item" style="cursor:default"><div class="lp-ic">'+
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 7.5h11M5.5 2.5v3M10.5 2.5v3"/></svg>'+
+        '</div><div class="lp-main"><div class="lp-name" style="color:var(--txt-3)">No recent projects</div>'+
+        '<div class="lp-meta">Create a new project to get started — sample media is optional</div></div></div>';
+      return;
+    }
+    items.forEach((r,i)=>{
+      const has=!!localStorage.getItem(Recents.snapshotKey(r.id));
+      const el=document.createElement('div');
+      el.className='lp-item'+(i===0?' first':'');
+      el.innerHTML='<div class="lp-ic">'+
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h11v9h-11z"/><path d="M2.5 7.5h11M5.5 2.5v3M10.5 2.5v3"/></svg></div>'+
+        '<div class="lp-main"><div class="lp-name">'+escHtml(r.name)+'</div>'+
+        '<div class="lp-meta">'+(has?'Auto-saved snapshot available':'Snapshot missing — media needs relinking')+'</div></div>'+
+        '<div class="lp-side"><div class="lp-when">'+timeAgo(r.last)+'</div></div>';
+      if(has)el.addEventListener('click',()=>{
+        const p=Recents.loadSnapshot(r.id);
+        if(p){Shell.loadProject(p);}
+        else action('Could not restore '+r.name);
+      });
+      else el.title='Snapshot unavailable';
+      el.addEventListener('contextmenu',e=>{
+        e.preventDefault();
+        openMenu(null,[
+          {t:'Remove from Recent Projects',act:()=>Recents.remove(r.id)}
+        ],e.clientX,e.clientY);
+      });
+      list.appendChild(el);
+    });
+  },
+
+  newProjectModal(){
+    const opts=Model.PRESETS.map((p,i)=>'<option value="'+i+'"'+(i===0?' selected="selected"':'')+'>'+p.n+'</option>').join('');
+    openModal('New Project',
+      '<label><span>Project Name</span><input class="scm-in" id="np-name" value="Untitled_Project" spellcheck="false"></label>'+
+      '<label><span>Sequence Preset</span><select class="scm-in" id="np-preset">'+opts+'</select></label>'+
+      '<label class="chk-lbl" style="margin:2px 0 4px"><input type="checkbox" class="chk" id="np-sample" checked="checked">'+
+      'Create sample media (color bars, 1 kHz tone, color matte) and a demo sequence</label>',
+      [{t:'Cancel'},{t:'Create Project',pri:true,act(){
+        const name=($('#np-name').value.trim()||'Untitled_Project').replace(/[^\w\-. ]+/g,'_');
+        const preset=Model.PRESETS[+$('#np-preset').value||0];
+        const sample=$('#np-sample').checked;
+        const p=Model.newProject(name,preset,sample);
+        Recents.touch(p.id,p.name);
+        Shell.loadProject(p);
+      }}]);
+  },
+
+  loadProject(p){
+    Playback.stop();
+    Store.p=p;
+    Store.dirty=false;
+    Cmd.clear();
+    S.selClips.clear();S.selAsset=null;
+    Source.clear();
+    Engine.Audio.rebuildBuses();
+    Engine.Audio.setTrackGains();
+    Shell.enterApp(true);
+    Recents.touch(p.id,p.name);
+    action('Project loaded: '+p.name);
+  },
+
+  enterApp(fresh){
+    const lc=$('#launcher');
+    if(lc){
+      lc.classList.add('fade');
+      setTimeout(()=>{
+        lc.classList.add('hide');
+        const app=$('#app');
+        app.classList.remove('hide');
+        requestAnimationFrame(()=>app.classList.remove('fade'));
+        setWorkspace(S.ws);
+        if(fresh){TL.fitSeq();Playback.seek(0);}
+        Compositor.applyRes();
+        Compositor.needDraw=true;
+      },220);
+    }
+    renderAll();
+  },
+
+  backToLauncher(){
+    Playback.stop();
+    if(Store.p&&Store.dirty)Recents.saveSnapshot(Store.p);
+    this.renderRecents();
+    const app=$('#app');
+    app.classList.add('fade');
+    setTimeout(()=>{
+      app.classList.add('hide');
+      const lc=$('#launcher');
+      lc.classList.remove('hide');
+      requestAnimationFrame(()=>lc.classList.remove('fade'));
+    },220);
+  },
+
+  /* ---------- save / open ---------- */
+  saveProject(){
+    if(!Store.p)return;
+    const blob=new Blob([Model.serialize(Store.p)],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=Store.p.name.replace(/\s+/g,'_')+'.synapticcut.json';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+    Store.setDirty(false);
+    Recents.saveSnapshot(Store.p);
+    Recents.touch(Store.p.id,Store.p.name);
+    action('Project saved');
+  },
+  openProjectFile(file){
+    const rd=new FileReader();
+    rd.onload=()=>{
+      try{
+        const p=Model.deserialize(rd.result);
+        Shell.loadProject(p);
+      }catch(err){
+        console.error(err);
+        openModal('Open Project','<div class="sc-list">Could not open this file:<br><br>'+err.message+'</div>',[{t:'OK',pri:true}]);
+      }
+    };
+    rd.readAsText(file);
+  },
+
+  /* ---------- chrome ---------- */
+  refreshChrome(){
+    if(!Store.p)return;
+    $('#tb-proj-name').textContent=Store.p.name;
+    const s=Store.seq;
+    $('#tb-seq-path').textContent=s?('Sequences / '+s.name):'no sequence';
+    $('#bin-proj').textContent=Store.p.name;
+    const fps=Store.p.settings.fps;
+    $('#sb-seq').textContent=s
+      ? s.name+' · '+Store.W()+'×'+Store.H()+' · '+fps+' fps · '+s.tracks.length+' tracks · '+fmtTC(Model.seqDuration(s),fps)
+      : 'No sequence';
+    $('#tl-sub').textContent=s?s.name:'—';
+    $('#tl-sub2').textContent=s
+      ? Model.seqDuration(s).toFixed(1)+' s · '+Store.W()+'×'+Store.H()+' · '+fps+' fps · '+s.tracks.length+' tracks'
+      : '—';
+    $('#tab-program').textContent=s?('Program: '+s.name):'Program';
+    Mon.refreshOverlays();
+    Shell.saveStatus();
+    Panels.selStatus();
+  },
+  saveStatus(){
+    const el=$('#save-status');
+    if(!el||!Store.p)return;
+    const d=new Date();
+    const hh=String(d.getHours()).padStart(2,'0'),mm=String(d.getMinutes()).padStart(2,'0');
+    el.innerHTML=Store.dirty
+      ?'<b style="color:#d3a668">Unsaved changes</b> · Auto-save '+hh+':'+mm
+      :'<b>Saved</b> · Auto-save '+hh+':'+mm;
+  },
+  toggleSnap(){
+    S.snap=!S.snap;
+    const a=$('#tb-snap'),b=$('#tl-snap');
+    if(a)a.classList.toggle('on',S.snap);
+    if(b)b.classList.toggle('on',S.snap);
+    action(S.snap?'Snapping enabled':'Snapping disabled');
+  },
+  autosave(){
+    if(Store.p&&(Store.dirty||!localStorage.getItem(Recents.snapshotKey(Store.p.id)))){
+      if(Recents.saveSnapshot(Store.p)){
+        Recents.touch(Store.p.id,Store.p.name);
+        Shell.saveStatus();
+      }
+    }
+  },
+
+  /* ---------- info dialogs ---------- */
+  seqSettingsDialog(){
+    const p=Store.p,s=Store.seq;
+    if(!p)return;
+    openModal('Sequence Settings',
+      '<div class="sc-list">'+
+      (s?'<b>Sequence</b> '+s.name+'<br>':'')+
+      '<b>Frame size</b> '+Store.W()+' × '+Store.H+'<br>'+
+      '<b>Frame rate</b> '+p.settings.fps+' fps<br>'+
+      '<b>Audio</b> 48 kHz stereo<br>'+
+      '<b>Tracks</b> '+(s?s.tracks.filter(t=>t.kind==='video').length:0)+' video · '+(s?s.tracks.filter(t=>t.kind==='audio').length:0)+' audio<br>'+
+      '<b>Clips</b> '+(s?s.tracks.reduce((n,t)=>n+t.clips.length,0):0)+
+      '</div>',[{t:'OK',pri:true}]);
+  },
+  aboutDialog(){
+    openModal('About SynapticCut',
+      '<div class="sc-list">'+
+      '<b>Version</b> '+SC.version+' (Milestone '+SC.milestone+')<br>'+
+      '<b>Engine</b> Canvas compositor · WebAudio mixer<br>'+
+      '<b>Project model</b> JSON, auto-saved locally<br>'+
+      '<br>SynapticCut runs entirely in your browser. Nothing is uploaded; media never leaves this machine.'+
+      '</div>',[{t:'OK',pri:true}]);
+  },
+  shortcutsDialog(){
+    openModal('Keyboard Shortcuts',
+      '<div class="sc-list">'+
+      '<div class="grp">Playback</div>'+
+      '<b>Space</b> Play / Stop<br><b>J K L</b> Shuttle reverse · stop · forward<br>'+
+      '<b>← →</b> Step one frame<br><b>Shift+← →</b> Step 10 frames<br>'+
+      '<b>Home End</b> Start / end of sequence<br>'+
+      '<div class="grp">Editing</div>'+
+      '<b>I O</b> Mark In / Out<br><b>M</b> Add marker<br>'+
+      '<b>Del</b> Delete selected clips<br><b>S</b> Toggle snapping<br>'+
+      '<b>Ctrl+Z</b> Undo · <b>Shift+Ctrl+Z</b> Redo<br>'+
+      '<div class="grp">Tools</div>'+
+      '<b>V</b> Selection · <b>C</b> Razor · <b>A</b> Track select · <b>B</b> Ripple<br>'+
+      '<b>Y</b> Slip · <b>P</b> Pen · <b>H</b> Hand · <b>T</b> Type · <b>Z</b> Zoom<br>'+
+      '<div class="grp">Project</div>'+
+      '<b>Ctrl+S</b> Save project · <b>Ctrl+I</b> Import media<br>'+
+      '<b>+ − \\</b> Timeline zoom in / out / fit<br>'+
+      '</div>',[{t:'OK',pri:true}]);
+  }
+};
+
+/* ================= MENUBAR ================= */
+const MENUS={
+  file:()=>[
+    {t:'New Project…',k:'Ctrl+N',act:()=>Shell.backToLauncher()},
+    {t:'New Sequence',k:'Ctrl+Alt+N',act:()=>{if(!Store.p)return;Model.newSequence(Store.p);Store.setDirty(true);Bus.emit('sequence');action('Sequence created');}},
+    {t:'New Bin',k:'Ctrl+/',act:()=>Bin.newBin()},
+    {sep:1},
+    {t:'Import Media…',k:'Ctrl+I',act:()=>$('#file-import').click()},
+    {sep:1},
+    {t:'Save Project',k:'Ctrl+S',act:()=>Shell.saveProject()},
+    {t:'Open Project…',act:()=>$('#file-open').click()},
+    {sep:1},
+    {t:'Link Media…',act:()=>Bin.relinkAll(),dis:!Bin.hasOffline()},
+    {t:'Project Settings…',act:()=>Shell.seqSettingsDialog()},
+    {sep:1},
+    {t:'Export ▸ Media…',k:'Ctrl+M',dis:true}
+  ],
+  edit:()=>[
+    {t:'Undo'+(Cmd.undoLabel()?' '+Cmd.undoLabel():''),k:'Ctrl+Z',act:()=>Cmd.undo(),dis:!Cmd.canUndo()},
+    {t:'Redo'+(Cmd.redoLabel()?' '+Cmd.redoLabel():''),k:'Shift+Ctrl+Z',act:()=>Cmd.redo(),dis:!Cmd.canRedo()},
+    {sep:1},
+    {t:'Cut',k:'Ctrl+X',dis:true},{t:'Copy',k:'Ctrl+C',dis:true},{t:'Paste',k:'Ctrl+V',dis:true},
+    {sep:1},
+    {t:'Select All',k:'Ctrl+A',act:()=>TL.selectAll()},
+    {t:'Deselect All',k:'Shift+Ctrl+A',act:()=>TL.clearSel()},
+    {sep:1},
+    {t:'Preferences',dis:true}
+  ],
+  clip:()=>{
+    const sel=TL.selInfo();
+    return [
+      {t:'Enable',k:'Shift+E',chk:()=>sel&&sel.clip.enabled,act:()=>TL.toggleEnable(),dis:!sel},
+      {sep:1},
+      {t:'Speed / Duration…',k:'Ctrl+R',dis:true},
+      {t:'Audio Gain…',k:'G',dis:true},
+      {sep:1},
+      {t:'Reveal in Project',act:()=>TL.revealSel(),dis:!sel},
+      {t:'Properties',act:()=>{Panels.renderProps();},dis:!sel}
+    ];
+  },
+  sequence:()=>[
+    {t:'Add Video Track',act:()=>TL.addTrack('video')},
+    {t:'Add Audio Track',act:()=>TL.addTrack('audio')},
+    {t:'Delete Empty Tracks',act:()=>TL.deleteEmptyTracks()},
+    {sep:1},
+    {t:'Razor at Playhead',k:'Ctrl+K',dis:true},
+    {t:'Clear All Markers',act:()=>TL.clearMarkers(),dis:!(Store.seq&&Store.seq.markers.length)},
+    {sep:1},
+    {t:'Sequence Settings…',act:()=>Shell.seqSettingsDialog()}
+  ],
+  effects:()=>[
+    {t:'Apply Default Video Transition',k:'Ctrl+D',dis:true},
+    {t:'Apply Default Audio Transition',k:'Shift+Ctrl+D',dis:true},
+    {sep:1},
+    {t:'Effect stacks arrive in Milestone 6',dis:true}
+  ],
+  view:()=>[
+    {t:'Zoom In',k:'=',act:()=>TL.setZoom(TL.pps*1.35)},
+    {t:'Zoom Out',k:'-',act:()=>TL.setZoom(TL.pps/1.35)},
+    {t:'Fit Sequence',k:'\\',act:()=>TL.fitSeq()},
+    {sep:1},
+    {t:'Safe Margins',chk:()=>S.safe,act:()=>Mon.toggleSafe()},
+    {sep:1},
+    {t:'Playback Resolution: Full',chk:()=>S.resScale===1,act:()=>Mon.setRes(1)},
+    {t:'Playback Resolution: Half',chk:()=>S.resScale===0.5,act:()=>Mon.setRes(0.5)},
+    {t:'Playback Resolution: Quarter',chk:()=>S.resScale===0.25,act:()=>Mon.setRes(0.25)}
+  ],
+  window:()=>[
+    {t:'Workspace: Editing',chk:()=>S.ws==='editing',act:()=>setWorkspace('editing')},
+    {t:'Workspace: Effects',chk:()=>S.ws==='effects',act:()=>setWorkspace('effects')},
+    {t:'Workspace: Audio',chk:()=>S.ws==='audio',act:()=>setWorkspace('audio')},
+    {t:'Workspace: Color',chk:()=>S.ws==='color',act:()=>setWorkspace('color')},
+    {sep:1},
+    {t:'Project',act:()=>setWorkspace('editing')},
+    {t:'Program Monitor',act:()=>setWorkspace('editing')},
+    {t:'Effect Controls',act:()=>setWorkspace('effects')},
+    {t:'Effects',act:()=>setWorkspace('effects')},
+    {t:'Audio Mixer',act:()=>setWorkspace('audio')},
+    {t:'Lumetri Color',act:()=>setWorkspace('color')},
+    {t:'Timeline',act:()=>setWorkspace('editing')}
+  ],
+  help:()=>[
+    {t:'SynapticCut Help',k:'F1',act:()=>Shell.shortcutsDialog()},
+    {t:'Keyboard Shortcuts…',act:()=>Shell.shortcutsDialog()},
+    {sep:1},
+    {t:'About SynapticCut…',act:()=>Shell.aboutDialog()}
+  ]
+};
+document.addEventListener('mousedown',e=>{
+  const b=e.target.closest('.menu-btn');
+  if(!b)return;
+  e.stopPropagation();
+  const P=POP();
+  if(P&&P.classList.contains('show')&&b.classList.contains('open')){closeMenu();return;}
+  closeMenu();
+  b.classList.add('open');
+  openMenu(b,MENUS[b.dataset.menu]());
+});
+</script>

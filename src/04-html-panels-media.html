@@ -3,7 +3,7 @@
   <div class="panel" id="panel-bin">
     <div class="panel-h">
       <span class="ph-title">Project</span>
-      <span class="ph-sub">Mountain_Documentary</span>
+      <span class="ph-sub" id="bin-proj">—</span>
       <div class="ph-r">
         <div class="bin-searchwrap" id="bin-searchwrap">
           <input id="bin-search" type="text" placeholder="Find media…" spellcheck="false">
@@ -11,7 +11,10 @@
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="6.8" cy="6.8" r="4.3"/><path d="M10.1 10.1 14 14"/></svg>
           </button>
         </div>
-        <button class="icb" data-tip="New Bin" data-key="Ctrl+/">
+        <button class="icb" id="btn-import" data-tip="Import Media" data-key="Ctrl+I">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h4l1.3 1.6h5.7v7.4h-11z"/><path d="M8 8.5v3.4M6.4 10.5 8 12.1l1.6-1.6"/></svg>
+        </button>
+        <button class="icb" id="btn-newbin" data-tip="New Bin" data-key="Ctrl+/">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2.5 4.5h4l1.3 1.6h5.7v7.4h-11z"/><path d="M8 8.4v3M6.5 9.9h3"/></svg>
         </button>
       </div>
@@ -22,10 +25,7 @@
         <div class="bin-main">
           <div class="bin-strip">
             <span class="bp" id="bin-path">Footage</span>
-            <span id="bin-count">14 items</span>
-            <span style="margin-left:auto;display:flex;gap:5px">
-              <span style="color:var(--txt-3)">List view</span>
-            </span>
+            <span id="bin-count"></span>
           </div>
           <div class="bin-list" id="bin-list">
             <div class="bin-head" id="bin-head">
@@ -47,7 +47,7 @@
     <div class="panel-h" style="gap:2px">
       <div id="mon-tabs">
         <button class="mtab" data-src="source">Source</button>
-        <button class="mtab on" data-src="program">Program: Act_II_Master</button>
+        <button class="mtab on" data-src="program" id="tab-program">Program</button>
       </div>
       <div class="ph-r" style="margin-left:auto">
         <button class="tbtn mres" id="btn-res" data-tip="Playback Resolution">Full <span class="car">▼</span></button>
@@ -63,38 +63,22 @@
     <div class="panel-b">
       <div class="mon-stage" id="mon-stage">
         <div class="sc-frame">
-          <svg class="scene" viewBox="0 0 640 360" preserveAspectRatio="xMidYMid slice">
-            <rect width="640" height="360" fill="#4b5a66"/>
-            <rect x="0" y="120" width="640" height="70" fill="#56636d" opacity=".5"/>
-            <rect x="0" y="52" width="640" height="26" fill="#5d6a74" opacity=".35"/>
-            <circle cx="484" cy="140" r="26" fill="#d6c69e" opacity=".85"/>
-            <circle cx="484" cy="140" r="40" fill="#d6c69e" opacity=".18"/>
-            <path d="M0 236 L74 176 L138 214 L212 152 L268 196 L322 168 L372 204 L640 176 L640 360 L0 360 Z" fill="#3c4854"/>
-            <path d="M0 268 L96 216 L176 252 L252 208 L330 248 L420 214 L508 250 L580 226 L640 246 L640 360 L0 360 Z" fill="#34414c"/>
-            <path d="M0 306 L120 262 L232 296 L348 258 L470 296 L560 270 L640 292 L640 360 L0 360 Z" fill="#2b353f"/>
-            <rect x="0" y="322" width="640" height="38" fill="#232c34"/>
-            <path d="M440 322h88l-9 6h-70z" fill="#c9b98f" opacity=".5"/>
-            <path d="M455 334h60l-7 4h-46z" fill="#c9b98f" opacity=".3"/>
-            <path d="M0 292 q160 -14 320 0 t320 0 v4 q-160 -14 -320 0 t-320 0 z" fill="#9fb0bb" opacity=".10"/>
-            <path d="M0 272 q180 -12 340 2 t300 -4" fill="none" stroke="#c7d3dc" stroke-width="5" opacity=".06"/>
-            <path d="M198 84 q5 -6 10 0 q5 -6 10 0" fill="none" stroke="#2a343d" stroke-width="1.6"/>
-            <path d="M236 70 q4 -5 8 0 q4 -5 8 0" fill="none" stroke="#2a343d" stroke-width="1.4"/>
-            <path d="M170 102 q4 -5 8 0 q4 -5 8 0" fill="none" stroke="#2a343d" stroke-width="1.2"/>
-            <rect x="0" y="354" width="640" height="6" fill="#151a1f"/>
-          </svg>
-          <div class="ov tl">PROGRAM · Act_II_Master</div>
-          <div class="ov bl">3840×2160 · 23.976</div>
-          <div class="ov br" id="ov-tc">00:00:37:14</div>
+          <canvas id="prog-canvas" width="1920" height="1080"> </canvas>
+          <div class="ov tl" id="ov-title">PROGRAM</div>
+          <div class="ov bl" id="ov-fmt">—</div>
+          <div class="ov br" id="ov-tc">00:00:00:00</div>
           <div id="safe-ov"><div class="sa1"></div><div class="sa2"></div></div>
         </div>
+        <div id="src-stage"><canvas id="src-canvas" width="1920" height="1080"> </canvas></div>
         <div class="src-empty">
           <svg width="30" height="30" viewBox="0 0 16 16" fill="none" stroke="#565e66" stroke-width="1">
             <path d="M2.5 3.5h11v9h-11z"/><path d="M2.5 6.8h11M5 2.2v2.6M11 2.2v2.6M4.6 9.4l2 1.6-2 1.6z" stroke="#6b747c"/>
           </svg>
-          <div class="se-t">No clip loaded</div>
-          <div class="se-s">Drag media from the Project panel to the Source monitor</div>
+          <div class="se-t">Source monitor</div>
+          <div class="se-s">Double-click media in the Project panel to open it here</div>
         </div>
       </div>
+      <div id="mon-scrub"><div class="ms-track"></div><div class="ms-io"></div><div class="ms-fill"></div><div class="ms-ph"></div></div>
       <div class="mon-controls">
         <span class="mon-tc" id="mon-tc">00:00:37:14</span>
         <div class="mon-center">
@@ -130,55 +114,13 @@
   <div class="panel" id="panel-props">
     <div class="panel-h">
       <span class="ph-title">Properties</span>
-      <span class="ph-chip">Interview_Marta_Closeup</span>
+      <span class="ph-chip" id="pp-chip">—</span>
       <div class="ph-r">
-        <span class="badge ok">Linked</span>
+        <span class="badge neu" id="pp-badge">—</span>
       </div>
     </div>
-    <div class="panel-b scroll">
-      <div class="sec open">
-        <div class="sec-h"><span class="car"><i></i></span>Transform</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl">Position</span><input class="num" value="1920"><input class="num" value="1080"><span class="unit">px</span></div>
-          <div class="prow"><span class="pl">Scale</span><input class="rng" type="range" min="10" max="200" value="100"><input class="num" value="100"><span class="unit">%</span></div>
-          <div class="prow"><span class="pl">Rotation</span><input class="rng" type="range" min="-180" max="180" value="0"><input class="num" value="0.0"><span class="unit">°</span></div>
-          <div class="chkrow" style="margin-top:3px">
-            <label class="chk-lbl"><input type="checkbox" class="chk" checked>Uniform Scale</label>
-            <label class="chk-lbl"><input type="checkbox" class="chk">Flip Horizontal</label>
-            <label class="chk-lbl"><input type="checkbox" class="chk">Flip Vertical</label>
-          </div>
-        </div>
-      </div>
-      <div class="sec open">
-        <div class="sec-h"><span class="car"><i></i></span>Opacity</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl">Opacity</span><input class="rng" type="range" min="0" max="100" value="100"><input class="num" value="100"><span class="unit">%</span></div>
-          <div class="mbtnrow"><span class="pl">Blend Mode</span><button class="tbtn">Normal <span class="car">▼</span></button></div>
-        </div>
-      </div>
-      <div class="sec open">
-        <div class="sec-h"><span class="car"><i></i></span>Audio</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl">Volume</span><input class="rng" type="range" min="-48" max="6" value="-3"><input class="num" value="-3.0"><span class="unit">dB</span></div>
-          <div class="mbtnrow"><span class="pl">Channels</span><button class="tbtn">Stereo <span class="car">▼</span></button></div>
-          <div class="chkrow" style="margin-top:3px">
-            <label class="chk-lbl"><input type="checkbox" class="chk">Mute</label>
-            <label class="chk-lbl"><input type="checkbox" class="chk" checked>Auto-match Audio</label>
-          </div>
-        </div>
-      </div>
-      <div class="sec">
-        <div class="sec-h"><span class="car"><i></i></span>Speed / Duration</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl">Speed</span><input class="rng" type="range" min="10" max="400" value="100"><input class="num" value="100"><span class="unit">%</span></div>
-          <div class="prow"><span class="pl">Duration</span><input class="num" value="00:00:35:00"><span class="unit"></span></div>
-        </div>
-      </div>
-      <div class="props-info">
-        <b>HEVC 10-bit 4:2:2 (H.265)</b><br>
-        3840×2160 · 23.976 fps · 2 audio ch<br>
-        /Footage/Interviews/Interview_Marta_Closeup.mov
-      </div>
+    <div class="panel-b scroll" id="pp-body">
+      <div class="props-info">Select a clip in the timeline or an asset in the Project panel to inspect it.</div>
     </div>
   </div>
 
@@ -186,41 +128,9 @@
   <div class="panel" id="panel-ec">
     <div class="panel-h">
       <span class="ph-title">Effect Controls</span>
-      <span class="ph-chip">Interview_Marta_Closeup</span>
+      <span class="ph-chip" id="ec-chip">—</span>
     </div>
-    <div class="panel-b scroll">
-      <div class="sec open">
-        <div class="sec-h"><span class="car"><i></i></span>Motion</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl"><span class="kfn"><button class="kf on" data-tip="Toggle Keyframe"></button><button class="knav" data-tip="Previous Keyframe">‹</button><button class="knav" data-tip="Next Keyframe">›</button></span>Position</span><input class="num" value="1920"><input class="num" value="1080"><span class="unit">px</span></div>
-          <div class="prow"><span class="pl"><span class="kfn"><button class="kf on" data-tip="Toggle Keyframe"></button><button class="knav" data-tip="Previous Keyframe">‹</button><button class="knav" data-tip="Next Keyframe">›</button></span>Scale</span><input class="rng" type="range" min="10" max="200" value="100"><input class="num" value="100"><span class="unit">%</span></div>
-          <div class="prow"><span class="pl"><span class="kfn"><button class="kf" data-tip="Toggle Keyframe"></button><button class="knav" data-tip="Previous Keyframe">‹</button><button class="knav" data-tip="Next Keyframe">›</button></span>Rotation</span><input class="rng" type="range" min="-180" max="180" value="-4"><input class="num" value="-4.0"><span class="unit">°</span></div>
-        </div>
-      </div>
-      <div class="sec open">
-        <div class="sec-h"><span class="car"><i></i></span>Opacity</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl"><span class="kfn"><button class="kf" data-tip="Toggle Keyframe"></button></span>Opacity</span><input class="rng" type="range" min="0" max="100" value="100"><input class="num" value="100"><span class="unit">%</span></div>
-        </div>
-      </div>
-      <div class="sec open">
-        <div class="sec-h"><span class="car"><i></i></span>Gaussian Blur</div>
-        <div class="sec-b">
-          <div class="prow"><span class="pl"><span class="kfn"><button class="kf on" data-tip="Toggle Keyframe"></button><button class="knav" data-tip="Previous Keyframe">‹</button><button class="knav" data-tip="Next Keyframe">›</button></span>Blurriness</span><input class="rng" type="range" min="0" max="100" value="24"><input class="num" value="24.5"><span class="unit"></span></div>
-          <div class="chkrow" style="margin-top:3px">
-            <label class="chk-lbl"><input type="checkbox" class="chk" checked>Horizontal</label>
-            <label class="chk-lbl"><input type="checkbox" class="chk">Vertical</label>
-            <label class="chk-lbl"><input type="checkbox" class="chk" checked>Repeat Edge Pixels</label>
-          </div>
-        </div>
-      </div>
-      <div class="sec">
-        <div class="sec-h"><span class="car"><i></i></span>Lumetri Color</div>
-        <div class="sec-b"><div class="tl-empty-hint">Basic Correction · Creative · Curves</div></div>
-      </div>
-      <div class="sec">
-        <div class="sec-h"><span class="car"><i></i></span>Cross Dissolve</div>
-        <div class="sec-b"><div class="tl-empty-hint">Transition · Duration 0.5 s · Aligned to Out</div></div>
-      </div>
+    <div class="panel-b scroll" id="ec-body">
+      <div class="props-info">Select a clip to edit its fixed effects (Motion, Opacity, Audio).</div>
     </div>
   </div>

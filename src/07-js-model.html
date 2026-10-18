@@ -1,0 +1,175 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 07 MODEL: project data model, serialization, recents
+   ===================================================================== */
+const Model={
+  PRESETS:[
+    {n:'HD 1080p · 25 fps (PAL)',w:1920,h:1080,fps:25},
+    {n:'HD 1080p · 24 fps (Film)',w:1920,h:1080,fps:24},
+    {n:'HD 1080p · 29.97 fps (NTSC)',w:1920,h:1080,fps:29.97},
+    {n:'UHD 4K · 24 fps',w:3840,h:2160,fps:24},
+    {n:'HD 720p · 30 fps',w:1280,h:720,fps:30}
+  ],
+  ROOT_BINS:[
+    {id:'footage',n:'Footage'},{id:'audio',n:'Audio'},{id:'graphics',n:'Graphics'},
+    {id:'generators',n:'Generators'},{id:'sequences',n:'Sequences'}
+  ],
+
+  newProject(name,preset,withSample){
+    const p={
+      id:ID.next('project'),name:name||'Untitled_Project',
+      createdAt:new Date().toISOString(),
+      settings:{width:preset.w,height:preset.h,fps:preset.fps,sampleRate:48000,stillDuration:5},
+      bins:Model.ROOT_BINS.map(b=>({id:b.id,name:b.n,parentId:null,open:true})),
+      assets:{},sequences:[],activeSequenceId:null,
+      idCounters:ID.counters()
+    };
+    if(withSample)Model._addSample(p);
+    return p;
+  },
+
+  newSequence(p,name){
+    const seq={
+      id:ID.next('seq'),name:name||('Sequence_'+String(p.sequences.length+1).padStart(2,'0')),
+      tracks:Model.defaultTracks(),markers:[],inPoint:null,outPoint:null
+    };
+    p.sequences.push(seq);p.activeSequenceId=seq.id;
+    return seq;
+  },
+  defaultTracks(){
+    return [
+      {id:'V2',kind:'video',name:'Video 2',visible:true,locked:false,height:30,gainDb:0,mute:false,solo:false,clips:[]},
+      {id:'V1',kind:'video',name:'Main',visible:true,locked:false,height:34,gainDb:0,mute:false,solo:false,clips:[]},
+      {id:'A1',kind:'audio',name:'Narration',visible:true,locked:false,height:46,gainDb:0,mute:false,solo:false,clips:[]},
+      {id:'A2',kind:'audio',name:'Music',visible:true,locked:false,height:46,gainDb:0,mute:false,solo:false,clips:[]}
+    ];
+  },
+
+  addAsset(p,a){p.assets[a.id]=a;},
+  removeAsset(p,id){
+    delete p.assets[id];
+    p.sequences.forEach(s=>s.tracks.forEach(t=>{t.clips=t.clips.filter(c=>c.assetId!==id);}));
+  },
+  asset(id){return Store.p?Store.p.assets[id]||null:null;},
+  binAssets(p,binId){return Object.values(p.assets).filter(a=>a.binId===binId);},
+
+  clip(seq,clipId){
+    if(!seq)return null;
+    for(const t of seq.tracks){
+      const c=t.clips.find(x=>x.id===clipId);
+      if(c)return{clip:c,track:t};
+    }
+    return null;
+  },
+  trackFor(seq,trackId){return seq?seq.tracks.find(t=>t.id===trackId)||null:null;},
+  clipEnd(c){return c.start+c.duration;},
+  seqDuration(seq){
+    if(!seq)return 0;
+    let m=0;seq.tracks.forEach(t=>t.clips.forEach(c=>{m=Math.max(m,Model.clipEnd(c));}));
+    return m;
+  },
+  frameSnap(t,fps){return Math.round(t*fps)/fps;},
+
+  newClip(p,asset,track,start,inPoint,duration){
+    return {
+      id:ID.next('clip'),assetId:asset.id,trackId:track.id,
+      start:Math.max(0,start),inPoint:Math.max(0,inPoint),duration:Math.max(0.04,duration),
+      name:asset.name,enabled:true,
+      transform:{x:0,y:0,scale:100,rotation:0,opacity:100},
+      audio:{volumeDb:0,muted:false}
+    };
+  },
+  /* first free gap on a track at or after `from` */
+  freeSlot(track,from,dur){
+    let t=Math.max(0,from);
+    const clips=[...track.clips].sort((a,b)=>a.start-b.start);
+    for(const c of clips){
+      if(Model.clipEnd(c)<=t)continue;
+      if(c.start-t>=dur)return t;
+      t=Model.clipEnd(c);
+    }
+    return t;
+  },
+  trackKindFor(asset){
+    if(asset.kind==='audio'||asset.kind==='tone')return 'audio';
+    return 'video';
+  },
+
+  _addSample(p){
+    const bars=Media.makeBars(p);
+    const tone=Media.makeTone(p,30);
+    const matte=Media.makeMatte(p,'#2e5f6e','Matte_DeepTeal');
+    const seq=Model.newSequence(p,'Broadcast_Check');
+    const V2=seq.tracks[0],V1=seq.tracks[1],A1=seq.tracks[2];
+    const c1=Model.newClip(p,bars,V1,0,0,10);
+    const c2=Model.newClip(p,matte,V2,2,0,5);
+    c2.transform.opacity=82;c2.transform.scale=56;c2.transform.x=-300;
+    const c3=Model.newClip(p,tone,A1,0,0,10);
+    c3.audio.volumeDb=-14;
+    V1.clips.push(c1);V2.clips.push(c2);A1.clips.push(c3);
+    seq.markers.push({t:2,name:'Matte in'});
+    seq.markers.push({t:7,name:'Matte out'});
+  },
+
+  /* ---------- serialization ---------- */
+  serialize(p){
+    return JSON.stringify({app:'SynapticCut',version:SC.version,savedAt:new Date().toISOString(),
+      project:JSON.parse(JSON.stringify(p))});
+  },
+  deserialize(json){
+    const o=JSON.parse(json);
+    if(o.app!=='SynapticCut'||!o.project)throw new Error('Not a SynapticCut project file');
+    const p=o.project;
+    p.idCounters=p.idCounters||{};
+    ID.init(p.idCounters);
+    Object.values(p.assets).forEach(a=>{
+      if(a.kind==='bars'||a.kind==='matte'||a.kind==='tone'){
+        a.offline=false;
+        Media.regen(a);
+      }else{
+        /* file-backed media needs a fresh File handle after a reload */
+        a.offline=true;
+      }
+    });
+    return p;
+  }
+};
+
+/* ================= RECENTS (localStorage) ================= */
+const Recents={
+  KEY:'synapticcut.recents',
+  list(){
+    try{return JSON.parse(localStorage.getItem(this.KEY))||[];}
+    catch(e){return[];}
+  },
+  touch(id,name){
+    let l=this.list().filter(r=>r.id!==id);
+    l.unshift({id,name,last:new Date().toISOString()});
+    l=l.slice(0,8);
+    try{localStorage.setItem(this.KEY,JSON.stringify(l));}catch(e){}
+    Bus.emit('recents');
+  },
+  remove(id){
+    const l=this.list().filter(r=>r.id!==id);
+    try{localStorage.setItem(this.KEY,JSON.stringify(l));
+      localStorage.removeItem(this.snapshotKey(id));}catch(e){}
+    Bus.emit('recents');
+  },
+  snapshotKey(id){return 'synapticcut.snapshot.'+id;},
+  saveSnapshot(p){
+    try{
+      localStorage.setItem(this.snapshotKey(p.id),Model.serialize(p));
+      return true;
+    }catch(e){
+      action('Auto-save failed: local storage full');
+      return false;
+    }
+  },
+  loadSnapshot(id){
+    const s=localStorage.getItem(this.snapshotKey(id));
+    if(!s)return null;
+    try{return Model.deserialize(s);}catch(e){return null;}
+  }
+};
+</script>
