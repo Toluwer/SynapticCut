@@ -123,9 +123,11 @@ document.addEventListener('click',e=>{
 });
 
 /* ================= DIALOGS ================= */
-function openModal(title,bodyHTML,buttons){
+function openModal(title,bodyHTML,buttons,width){
   const card=$('#modal-card');
   if(!card)return;
+  /* width persists on the card element across dialogs: reset or set it every time */
+  card.style.width=width?Math.max(340,Math.min(width,920))+'px':'';
   card.innerHTML='<div class="scm-h">'+title+'</div><div class="scm-b">'+bodyHTML+'</div>'+
     '<div class="scm-f"></div>';
   const f=card.querySelector('.scm-f');
@@ -330,7 +332,7 @@ const Shell={
     openModal('Sequence Settings',
       '<div class="sc-list">'+
       (s?'<b>Sequence</b> '+s.name+'<br>':'')+
-      '<b>Frame size</b> '+Store.W()+' × '+Store.H+'<br>'+
+      '<b>Frame size</b> '+Store.W()+' × '+Store.H()+'<br>'+
       '<b>Frame rate</b> '+p.settings.fps+' fps<br>'+
       '<b>Audio</b> 48 kHz stereo<br>'+
       '<b>Tracks</b> '+(s?s.tracks.filter(t=>t.kind==='video').length:0)+' video · '+(s?s.tracks.filter(t=>t.kind==='audio').length:0)+' audio<br>'+

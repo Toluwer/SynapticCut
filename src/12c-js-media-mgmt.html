@@ -1,0 +1,533 @@
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 12c MEDIA MGMT (M3): undoable bin / asset / sequence
+   operations, sequence manager, link-media workflow, F2 rename.
+
+   All structural ops go through one snapshot mechanism: _snap() deep-copies
+   {bins, assets, sequences, activeSequenceId}; a command swaps before/after
+   snapshots, so compound ops (delete bin + purge assets + strip clips from
+   every sequence) are a single undo step and undo chains restore exactly.
+   Runtime media elements (Media.assetEls / clipEls) are keyed by id and
+   survive snapshots untouched, so undo brings media straight back.
+   ===================================================================== */
+const MediaOps={
+
+  /* ============ snapshot machinery ============ */
+  deep(o){return JSON.parse(JSON.stringify(o));},
+  _snap(){
+    const p=Store.p;
+    return {bins:this.deep(p.bins),assets:this.deep(p.assets),
+      sequences:this.deep(p.sequences),activeSequenceId:p.activeSequenceId};
+  },
+  _apply(st){
+    const p=Store.p;
+    p.bins=this.deep(st.bins);
+    p.assets=this.deep(st.assets);
+    p.sequences=this.deep(st.sequences);
+    p.activeSequenceId=st.activeSequenceId;
+    /* repair view state that pointed at removed model objects */
+    if(!p.bins.some(b=>b.id===S.folder))S.folder='footage';
+    if(S.selAsset&&!p.assets[S.selAsset]&&!p.sequences.some(s=>s.id===S.selAsset))S.selAsset=null;
+    if(S.srcAssetId&&!p.assets[S.srcAssetId])Source.clear();
+    const alive=new Set();
+    p.sequences.forEach(s=>s.tracks.forEach(t=>t.clips.forEach(c=>alive.add(c.id))));
+    [...S.selClips].forEach(id=>{if(!alive.has(id))S.selClips.delete(id);});
+    Engine.Audio.rebuildBuses();
+    Engine.Audio.setTrackGains();
+    Engine.Audio.reattachAll();
+    Bus.emit('assets');
+    Bus.emit('sequence');
+    Bus.emit('sel');
+  },
+  _run(label,before,after){
+    Cmd.run({label,
+      do(){MediaOps._apply(after);},
+      undo(){MediaOps._apply(before);}});
+  },
+
+  /* ============ bin operations ============ */
+  newBinDialog(parentId){
+    const p=Store.p;if(!p)return;
+    const parent=p.bins.find(b=>b.id===parentId)||
+      p.bins.find(b=>b.id===S.folder)||p.bins[0];
+    openModal('New Bin',
+      '<label><span>Bin Name</span><input class="scm-in" id="nb-name" value="Bin_'+
+      String(p.bins.length+1).padStart(2,'0')+'" spellcheck="false"></label>'+
+      '<div class="sc-list" style="margin-top:2px"><b>Inside</b> '+escHtml(Bin.binName(parent.id))+'</div>',
+      [{t:'Cancel'},{t:'Create Bin',pri:true,act:()=>{
+        const name=($('#nb-name').value.trim()||'Bin').replace(/[^\w\-. ]+/g,'_');
+        MediaOps.createBin(parent.id,name);
+      }}]);
+  },
+  createBin(parentId,name){
+    const p=Store.p;if(!p)return;
+    const before=this._snap();
+    const b={id:ID.next('bin'),name,parentId:parentId||null,open:true};
+    p.bins.push(b);
+    const parent=p.bins.find(x=>x.id===b.parentId);
+    if(parent)parent.open=true;
+    const after=this._snap();
+    this._run('New Bin',before,after);
+    S.folder=b.id;
+    Bus.emit('assets');
+    action('Created bin '+name);
+  },
+  renameBin(binId,name){
+    const p=Store.p;
+    const b=p?p.bins.find(x=>x.id===binId):null;
+    if(!b)return;
+    const before=this._snap();
+    b.name=name;
+    const after=this._snap();
+    this._run('Rename Bin',before,after);
+    action('Renamed bin to '+name);
+  },
+  deleteBinDialog(b){
+    const p=Store.p;
+    if(!p||!b)return;
+    if(!b.parentId){action('Root bins cannot be deleted');return;}
+    const kids=p.bins.filter(x=>x.parentId===b.id);
+    if(kids.length){
+      openModal('Delete Bin','<div class="sc-list">"'+escHtml(b.name)+'" contains '+kids.length+
+        ' sub-bin(s).<br>Delete or move those first.</div>',[{t:'OK',pri:true}]);
+      return;
+    }
+    const assets=Model.binAssets(p,b.id);
+    if(!assets.length){this.deleteBin(b.id,'keep');return;}
+    const parent=p.bins.find(x=>x.id===b.parentId);
+    openModal('Delete Bin "'+escHtml(b.name)+'"',
+      '<div class="sc-list"><b>Contains</b> '+assets.length+' asset(s)</div>'+
+      '<div style="margin-top:8px">Move the assets to "'+escHtml(parent?parent.name:'?')+
+      '" or delete them together with the bin. Both paths are undoable.</div>',
+      [{t:'Cancel'},
+       {t:'Delete Bin + Assets',act:()=>MediaOps.deleteBin(b.id,'purge')},
+       {t:'Move Assets + Delete',pri:true,act:()=>MediaOps.deleteBin(b.id,'move')}]);
+  },
+  deleteBin(binId,mode){
+    const p=Store.p;
+    const b=p?p.bins.find(x=>x.id===binId):null;
+    if(!b)return;
+    if(!b.parentId){action('Root bins cannot be deleted');return;}
+    const before=this._snap();
+    const parent=p.bins.find(x=>x.id===b.parentId);
+    if(mode==='move'&&parent){
+      Object.values(p.assets).forEach(a=>{if(a.binId===binId)a.binId=parent.id;});
+    }else if(mode==='purge'){
+      Object.values(p.assets).filter(a=>a.binId===binId)
+        .forEach(a=>{Model.removeAsset(p,a.id);Engine.Audio.purgeAsset(a.id);});
+    }
+    p.bins=p.bins.filter(x=>x.id!==binId);
+    if(S.folder===binId)S.folder=b.parentId;
+    const after=this._snap();
+    this._run('Delete Bin',before,after);
+    action('Deleted bin '+b.name);
+  },
+
+  /* ============ asset operations ============ */
+  usageOf(assetId){
+    const res={clips:0,sequences:new Set()};
+    if(!Store.p)return res;
+    Store.p.sequences.forEach(s=>s.tracks.forEach(t=>t.clips.forEach(c=>{
+      if(c.assetId===assetId){res.clips++;res.sequences.add(s.name);}
+    })));
+    return res;
+  },
+  renameAssetDialog(a){
+    if(!a)return;
+    openModal('Rename Asset',
+      '<label><span>Name</span><input class="scm-in" id="ra-name" value="'+escHtml(a.name)+'" spellcheck="false"></label>',
+      [{t:'Cancel'},{t:'Rename',pri:true,act:()=>{
+        const v=$('#ra-name').value.trim();
+        if(v&&v!==a.name)MediaOps.renameAsset(a.id,v);
+      }}]);
+  },
+  renameAsset(assetId,name){
+    const p=Store.p;
+    const a=p?p.assets[assetId]:null;
+    if(!a)return;
+    const before=this._snap();
+    a.name=name;
+    const after=this._snap();
+    this._run('Rename Asset',before,after);
+    action('Renamed to '+name);
+  },
+  moveAssetsToBinDialog(a){
+    const p=Store.p;
+    if(!p||!a)return;
+    const bins=p.bins.filter(b=>b.id!==a.binId);
+    if(!bins.length){action('No other bins to move to');return;}
+    openModal('Move to Bin',
+      '<div class="sc-list" style="margin-bottom:6px"><b>Asset</b> '+escHtml(a.name)+'</div>'+
+      '<div class="mm-list">'+bins.map(b=>
+        '<div class="mm-row" data-bin="'+b.id+'"><span class="tchip">B</span>'+
+        '<span class="mm-path">'+escHtml(Bin.binName(b.id))+'</span></div>').join('')+'</div>',
+      [{t:'Cancel'}]);
+    const card=$('#modal-card');
+    if(card)card.querySelectorAll('.mm-row').forEach(r=>r.addEventListener('click',()=>{
+      closeModal();
+      MediaOps.moveAssets([a.id],r.dataset.bin);
+    }));
+  },
+  moveAssets(ids,binId){
+    const p=Store.p;
+    if(!p||!p.bins.some(b=>b.id===binId))return;
+    const before=this._snap();
+    const moved=ids.filter(id=>p.assets[id]&&p.assets[id].binId!==binId);
+    if(!moved.length){Bus.emit('assets');return;}
+    moved.forEach(id=>{p.assets[id].binId=binId;});
+    const after=this._snap();
+    this._run('Move to Bin',before,after);
+    S.folder=binId;
+    Bus.emit('assets');
+    action('Moved '+moved.length+' item(s) to '+Bin.binName(binId));
+  },
+  removeAssetDialog(a){
+    if(!a)return;
+    const u=this.usageOf(a.id);
+    if(!u.clips){this.removeAsset(a.id);return;}
+    openModal('Remove from Project',
+      '<div class="sc-list"><b>Asset</b> '+escHtml(a.name)+'<br>'+
+      '<b>Used by</b> '+u.clips+' clip(s) in '+[...u.sequences].map(escHtml).join(', ')+'</div>'+
+      '<div style="margin-top:8px">Removing the asset also removes those clips from every sequence. Undoable.</div>',
+      [{t:'Cancel'},{t:'Remove Asset + Clips',pri:true,act:()=>MediaOps.removeAsset(a.id)}]);
+  },
+  removeAsset(assetId){
+    const p=Store.p;
+    const a=p?p.assets[assetId]:null;
+    if(!a)return;
+    const before=this._snap();
+    Model.removeAsset(p,assetId);
+    Engine.Audio.purgeAsset(assetId);
+    if(S.selAsset===assetId)S.selAsset=null;
+    if(S.srcAssetId===assetId)Source.clear();
+    const after=this._snap();
+    this._run('Remove Asset',before,after);
+    action('Removed '+a.name);
+  },
+
+  /* ============ sequence operations ============ */
+  newSequenceDialog(){
+    const p=Store.p;if(!p)return;
+    openModal('New Sequence',
+      '<label><span>Sequence Name</span><input class="scm-in" id="ns-name" value="Sequence_'+
+      String(p.sequences.length+1).padStart(2,'0')+'" spellcheck="false"></label>'+
+      '<div class="sc-list" style="margin-top:2px"><b>Format</b> '+
+      Store.W()+' × '+Store.H()+' · '+Store.fps()+' fps (project preset)</div>',
+      [{t:'Cancel'},{t:'Create Sequence',pri:true,act:()=>{
+        const name=($('#ns-name').value.trim()||'Sequence').replace(/[^\w\-. ]+/g,'_');
+        MediaOps.createSequence(name);
+      }}]);
+  },
+  createSequence(name){
+    const p=Store.p;if(!p)return;
+    const before=this._snap();
+    const seq={id:ID.next('seq'),name,tracks:Model.defaultTracks(),markers:[],inPoint:null,outPoint:null};
+    p.sequences.push(seq);
+    p.activeSequenceId=seq.id;
+    const after=this._snap();
+    this._run('New Sequence',before,after);
+    Playback.seek(0);
+    action('Created sequence '+name);
+  },
+  renameSequenceDialog(s,cb){
+    if(!s)return;
+    openModal('Rename Sequence',
+      '<label><span>Sequence Name</span><input class="scm-in" id="rs-name" value="'+escHtml(s.name)+'" spellcheck="false"></label>',
+      [{t:'Cancel'},{t:'Rename',pri:true,act:()=>{
+        const v=$('#rs-name').value.trim();
+        if(v&&v!==s.name)MediaOps.renameSequence(s.id,v);
+        if(cb)cb();
+      }}]);
+  },
+  renameSequence(seqId,name){
+    const p=Store.p;
+    const s=p?p.sequences.find(x=>x.id===seqId):null;
+    if(!s)return;
+    const before=this._snap();
+    s.name=name;
+    const after=this._snap();
+    this._run('Rename Sequence',before,after);
+    action('Renamed sequence to '+name);
+  },
+  _uniqSeqName(p,base){
+    let n=base,i=2;
+    while(p.sequences.some(s=>s.name===n))n=base+'_'+(i++);
+    return n;
+  },
+  duplicateSequence(seqId){
+    const p=Store.p;
+    const src=p?p.sequences.find(s=>s.id===seqId):null;
+    if(!src)return;
+    const before=this._snap();
+    const copy=this.deep(src);
+    copy.id=ID.next('seq');
+    copy.name=this._uniqSeqName(p,src.name+'_Copy');
+    /* clip ids are global (runtime decoder map): re-issue every copied clip id */
+    copy.tracks.forEach(t=>t.clips.forEach(c=>{c.id=ID.next('clip');}));
+    p.sequences.push(copy);
+    const after=this._snap();
+    this._run('Duplicate Sequence',before,after);
+    action('Duplicated as '+copy.name);
+  },
+  deleteSequenceDialog(s,cb){
+    if(!s)return;
+    const p=Store.p;
+    if(p.sequences.length<=1){action('Cannot delete the only sequence');return;}
+    const n=s.tracks.reduce((n,t)=>n+t.clips.length,0);
+    if(!n){this.deleteSequence(s.id);if(cb)cb();return;}
+    openModal('Delete Sequence',
+      '<div class="sc-list"><b>Sequence</b> '+escHtml(s.name)+'<br><b>Contains</b> '+n+' clip(s)</div>'+
+      '<div style="margin-top:8px">The sequence and its clips are removed. Undoable (Ctrl+Z).</div>',
+      [{t:'Cancel'},{t:'Delete Sequence',pri:true,act:()=>{
+        MediaOps.deleteSequence(s.id);
+        if(cb)cb();
+      }}]);
+  },
+  deleteSequence(seqId){
+    const p=Store.p;
+    if(!p)return;
+    if(p.sequences.length<=1){action('Cannot delete the only sequence');return;}
+    const s=p.sequences.find(x=>x.id===seqId);
+    if(!s)return;
+    const before=this._snap();
+    s.tracks.forEach(t=>t.clips.forEach(c=>Engine.Audio.detachClip(c.id)));
+    p.sequences=p.sequences.filter(x=>x.id!==seqId);
+    if(p.activeSequenceId===seqId)p.activeSequenceId=p.sequences[0].id;
+    const after=this._snap();
+    this._run('Delete Sequence',before,after);
+    action('Deleted sequence '+s.name);
+  },
+  openSequence(seqId){
+    const p=Store.p;
+    const s=p?p.sequences.find(x=>x.id===seqId):null;
+    if(!s)return;
+    p.activeSequenceId=seqId;
+    Store.setDirty(true);
+    S.selClips.clear();
+    Bus.emit('sequence');
+    Bus.emit('sel');
+    Playback.seek(0);
+    action('Opened sequence '+s.name);
+  },
+
+  /* ============ sequence manager ============ */
+  _modalTitleIs(t){
+    const ov=$('#modal-ov'),card=$('#modal-card');
+    if(!ov||!card||!ov.classList.contains('show'))return false;
+    const h=card.querySelector('.scm-h');
+    return !!h&&h.textContent===t;
+  },
+  sequenceManager(){
+    const p=Store.p;if(!p)return;
+    const fps=Store.fps();
+    const rows=p.sequences.map(s=>{
+      const dur=Model.seqDuration(s);
+      const v=s.tracks.filter(t=>t.kind==='video').length;
+      const a=s.tracks.filter(t=>t.kind==='audio').length;
+      const n=s.tracks.reduce((n,t)=>n+t.clips.length,0);
+      return '<div class="sm-row'+(s.id===p.activeSequenceId?' on':'')+'" data-seq="'+s.id+'">'+
+        '<span class="sm-name">'+escHtml(s.name)+
+        (s.id===p.activeSequenceId?'<span class="badge acc">Active</span>':'')+'</span>'+
+        '<span class="sm-meta">'+fmtTC(dur,fps)+' · '+v+'V/'+a+'A · '+n+' clips</span>'+
+        '<span class="sm-btns">'+
+          '<button class="tbtn" data-sm="open">Open</button>'+
+          '<button class="tbtn" data-sm="ren">Rename…</button>'+
+          '<button class="tbtn" data-sm="dup">Duplicate</button>'+
+          '<button class="tbtn" data-sm="del">Delete</button>'+
+        '</span></div>';
+    }).join('');
+    openModal('Sequence Manager','<div class="sm-list">'+rows+'</div>',
+      [{t:'New Sequence…',act:()=>MediaOps.newSequenceDialog()},{t:'Done',pri:true}],640);
+    const card=$('#modal-card');
+    if(!card)return;
+    const reopen=()=>MediaOps.sequenceManager();
+    card.querySelectorAll('.sm-row').forEach(row=>{
+      const id=row.dataset.seq;
+      const s=p.sequences.find(x=>x.id===id);
+      row.addEventListener('click',e=>{
+        if(e.target.closest('.sm-btns'))return;
+        MediaOps.openSequence(id);reopen();
+      });
+      row.querySelectorAll('.tbtn').forEach(b=>b.addEventListener('click',e=>{
+        e.stopPropagation();
+        const act=b.dataset.sm;
+        if(act==='open'){MediaOps.openSequence(id);reopen();}
+        else if(act==='ren'){MediaOps.renameSequenceDialog(s,reopen);}
+        else if(act==='dup'){MediaOps.duplicateSequence(id);reopen();}
+        else if(act==='del'){MediaOps.deleteSequenceDialog(s,reopen);}
+      }));
+    });
+  },
+
+  /* ============ link media (relink workflow) ============ */
+  linkMediaModal(){
+    const p=Store.p;if(!p)return;
+    const off=Object.values(p.assets).filter(a=>a.offline);
+    if(!off.length){action('No offline media');return;}
+    openModal('Link Media',
+      '<div class="sc-list" style="margin-bottom:8px"><b>Offline</b> '+off.length+' item(s)</div>'+
+      '<div class="lm-list">'+off.map(a=>
+        '<div class="lm-row"><span class="tchip">'+(Bin.TYCH[a.kind]||'?')+'</span>'+
+        '<span class="lm-name">'+escHtml(a.name)+'<span class="lm-sub">'+escHtml(a.fileName||'—')+'</span></span>'+
+        '<button class="tbtn" data-lm="'+a.id+'">Link…</button></div>').join('')+'</div>'+
+      '<div class="props-info" style="padding:8px 2px 0">Pick the original file on disk for each item. Nothing leaves this machine.</div>',
+      [{t:'Link All…',act:()=>MediaOps.relinkQueue(off.map(a=>a.id))},{t:'Done',pri:true}]);
+    const card=$('#modal-card');
+    if(card)card.querySelectorAll('.lm-row .tbtn').forEach(b=>
+      b.addEventListener('click',()=>MediaOps.relinkQueue([b.dataset.lm])));
+  },
+  relinkQueue(ids){
+    const step=i=>{
+      if(i>=ids.length){action('Relink finished');return;}
+      const a=Model.asset(ids[i]);
+      if(!a||!a.offline){step(i+1);return;}
+      const inp=$('#file-relink');
+      if(!inp){step(i+1);return;}
+      inp.value='';
+      inp.onchange=()=>{
+        const f=inp.files&&inp.files[0];
+        if(!f)return;                 /* picker cancelled: queue stops quietly */
+        Media.relink(a.id,f).then(()=>{
+          if(MediaOps._modalTitleIs('Link Media'))MediaOps.linkMediaModal();
+          step(i+1);
+        });
+      };
+      inp.click();
+    };
+    step(0);
+  },
+
+  /* ============ F2: rename whatever is selected ============ */
+  renameSelection(){
+    if(!Store.p)return;
+    if(S.selAsset){
+      const a=Store.p.assets[S.selAsset];
+      if(a){this.renameAssetDialog(a);return;}
+      const s=Store.p.sequences.find(x=>x.id===S.selAsset);
+      if(s){this.renameSequenceDialog(s);return;}
+    }
+    const b=Store.p.bins.find(x=>x.id===S.folder);
+    if(b){
+      const row=$('#tree .tree-row[data-bin="'+b.id+'"]');
+      if(row){Bin.inlineRename(row,b);return;}
+    }
+    action('Nothing selected to rename');
+  }
+};
+
+/* ================= M3 overrides / wiring ================= */
+Bin.newBin=parent=>MediaOps.newBinDialog(parent||undefined);
+Bin.removeAsset=a=>MediaOps.removeAssetDialog(a);
+Bin.relinkAll=()=>MediaOps.linkMediaModal();
+
+MENUS.file=()=>[
+  {t:'New Project…',k:'Ctrl+N',act:()=>Shell.backToLauncher()},
+  {t:'New Sequence…',k:'Ctrl+Alt+N',act:()=>MediaOps.newSequenceDialog()},
+  {t:'New Bin…',k:'Ctrl+/',act:()=>MediaOps.newBinDialog()},
+  {sep:1},
+  {t:'Import Media…',k:'Ctrl+I',act:()=>$('#file-import').click()},
+  {sep:1},
+  {t:'Save Project',k:'Ctrl+S',act:()=>Shell.saveProject()},
+  {t:'Open Project…',act:()=>$('#file-open').click()},
+  {sep:1},
+  {t:'Link Media…',act:()=>MediaOps.linkMediaModal(),dis:!Bin.hasOffline()},
+  {t:'Project Settings…',act:()=>Shell.seqSettingsDialog()},
+  {sep:1},
+  {t:'Export ▸ Media…',k:'Ctrl+M',dis:true}
+];
+
+MENUS.sequence=()=>{
+  const s=Store.seq,p=Store.p;
+  if(!p)return[{t:'No project',dis:true}];
+  return [
+    {t:'New Sequence…',k:'Ctrl+Alt+N',act:()=>MediaOps.newSequenceDialog()},
+    {t:'Sequence Manager…',act:()=>MediaOps.sequenceManager()},
+    {sep:1},
+    {t:'Rename Sequence…',act:()=>MediaOps.renameSequenceDialog(s),dis:!s},
+    {t:'Duplicate Sequence',act:()=>MediaOps.duplicateSequence(p.activeSequenceId),dis:!s},
+    {t:'Delete Sequence',act:()=>MediaOps.deleteSequenceDialog(s),dis:!s||p.sequences.length<=1},
+    {sep:1},
+    {t:'Add Video Track',act:()=>EditOps.addTrack('video')},
+    {t:'Add Audio Track',act:()=>EditOps.addTrack('audio')},
+    {t:'Delete Empty Tracks',act:()=>EditOps.deleteEmptyTracks()},
+    {sep:1},
+    {t:'Razor at Playhead',k:'Ctrl+K',act:()=>EditOps.razorAtPlayhead()},
+    {t:'Clear All Markers',act:()=>EditOps.clearMarkers(),dis:!(s&&s.markers.length)},
+    {sep:1},
+    {t:'Sequence Settings…',act:()=>Shell.seqSettingsDialog()}
+  ];
+};
+
+/* restore the saved bin view (folder / search / sort / filter) on project load.
+   The prefs are snapshotted BEFORE the original loadProject runs, because its
+   renderAll() -> Bin.render() -> savePrefs() would clobber the stored state
+   with the pre-restore session defaults before applyPrefs could read it. */
+(function(){
+  const _loadProject=Shell.loadProject;
+  Shell.loadProject=function(p){
+    let saved=null;
+    try{saved=localStorage.getItem(Bin.PREFKEY);}catch(e){}
+    _loadProject(p);
+    Bin.applyPrefs(saved);
+  };
+})();
+
+/* topbar sequence switcher (the "Sequences / <name>" label is clickable) */
+(function(){
+  const sp=$('#tb-seq-path');
+  if(!sp)return;
+  sp.addEventListener('click',e=>{
+    const p=Store.p;if(!p)return;
+    e.stopPropagation();
+    const items=p.sequences.map(s=>({
+      t:escHtml(s.name),
+      chk:()=>s.id===p.activeSequenceId,
+      act:()=>MediaOps.openSequence(s.id)
+    }));
+    items.push({sep:1},
+      {t:'New Sequence…',act:()=>MediaOps.newSequenceDialog()},
+      {t:'Sequence Manager…',act:()=>MediaOps.sequenceManager()});
+    openMenu(null,items,e.clientX-20,e.clientY+16);
+  });
+})();
+
+/* shortcuts map, extended with the M3 media group */
+Shell.shortcutsDialog=function(){
+  openModal('Keyboard Shortcuts',
+    '<div class="sc-list">'+
+    '<div class="grp">Playback</div>'+
+    '<b>Space</b> Play / Stop &nbsp; <b>J K L</b> Shuttle reverse / stop / forward<br>'+
+    '<b>Left Right</b> Step one frame &nbsp; <b>Shift+arrows</b> Step 10 frames<br>'+
+    '<b>Home End</b> Start / end of sequence<br>'+
+    '<div class="grp">Tools</div>'+
+    '<b>V</b> Select &nbsp; <b>C</b> Razor &nbsp; <b>A</b> Track select &nbsp; <b>B</b> Ripple trim<br>'+
+    '<b>Y</b> Slip (M4) &nbsp; <b>P</b> Pen (M6) &nbsp; <b>H</b> Hand &nbsp; <b>T</b> Type (M4) &nbsp; <b>Z</b> Zoom<br>'+
+    '<div class="grp">Trim + Split</div>'+
+    '<b>drag clip edge</b> Trim in / out &nbsp; <b>Shift+drag edge</b> Ripple trim<br>'+
+    '<b>Q W</b> Ripple-trim to playhead (in / out)<br>'+
+    '<b>Ctrl+K</b> Razor at playhead<br>'+
+    '<div class="grp">Delete + Clipboard</div>'+
+    '<b>Del</b> Delete (leave gap) &nbsp; <b>Shift+Del</b> Ripple delete<br>'+
+    '<b>Ctrl+X / C / V</b> Cut / Copy / Paste at playhead<br>'+
+    '<b>Ctrl+D</b> Duplicate<br>'+
+    '<div class="grp">Drop modes</div>'+
+    '<b>Insert / Overwrite buttons</b> in the timeline toolbar set the drop mode<br>'+
+    '<b>Ctrl while dropping</b> flips the mode for that drop only<br>'+
+    '<b>, .</b> Insert / Overwrite source clip at playhead<br>'+
+    '<div class="grp">Marks</div>'+
+    '<b>I O</b> Mark in / out &nbsp; <b>M</b> Add marker &nbsp; <b>Shift+M</b> Next marker<br>'+
+    '<div class="grp">Selection</div>'+
+    '<b>Shift+click</b> Add / remove &nbsp; <b>drag empty timeline</b> Marquee select<br>'+
+    '<b>Ctrl+A</b> Select all &nbsp; <b>Shift+Ctrl+A</b> Deselect all<br>'+
+    '<div class="grp">Media (M3)</div>'+
+    '<b>F2</b> Rename selected bin / asset / sequence<br>'+
+    '<b>Ctrl+/</b> New bin &nbsp; <b>Ctrl+Alt+N</b> New sequence<br>'+
+    '<b>drag asset onto a bin</b> Move to that bin &nbsp; <b>double-click bin</b> Rename inline<br>'+
+    '<b>click the sequence name</b> in the top bar to switch sequences<br>'+
+    '<div class="grp">Project</div>'+
+    '<b>Ctrl+S</b> Save project &nbsp; <b>Ctrl+I</b> Import media &nbsp; <b>S</b> Snapping<br>'+
+    '<b>+ - \\</b> Timeline zoom in / out / fit &nbsp; <b>Ctrl+Z</b> Undo &nbsp; <b>Shift+Ctrl+Z</b> Redo<br>'+
+    '</div>',[{t:'OK',pri:true}]);
+};
+</script>

@@ -110,23 +110,108 @@ const Panels={_focusOld:null,_focusPath:null,
       body.innerHTML='<div class="props-info">'+S.selClips.size+' clips selected.<br>Use Edit menu commands or Delete to modify the selection.</div>';
     }else if(S.selAsset){
       const a=Model.asset(S.selAsset);
+      const seq=(!a&&Store.p)?Store.p.sequences.find(s=>s.id===S.selAsset):null;
       if(a){
         chip.textContent=a.name;
         const st=Bin.statusOf(a);
         badge.textContent=st.lbl;badge.className='badge '+st.cls;
         const fps=Store.fps();
-        body.innerHTML='<div class="props-info">'+
-          '<b>'+escHtml(a.name)+'</b><br>'+
-          (a.fileName?a.fileName+' · '+fmtBytes(a.fileSize)+'<br>':'')+
-          'Duration '+fmtTC(a.duration||0,fps)+'<br>'+
-          Bin.fmtOf(a)+'<br>'+
-          (a.offline?'<span style="color:#d38981">Media offline — right-click to relink</span><br>':'')+
+        const kv=(k,v)=>'<div class="kv"><b>'+k+'</b><span>'+v+'</span></div>';
+        let rows='';
+        rows+=kv('Duration',fmtTC(a.duration||0,fps)+' · '+(a.duration||0).toFixed(2)+' s');
+        if(a.kind==='video'){
+          rows+=kv('Resolution',(a.meta.width||'?')+' × '+(a.meta.height||'?'));
+          rows+=kv('Frame rate',a.meta.fps?a.meta.fps+' fps':'unknown');
+          if(a.meta.hasAudio!==undefined)rows+=kv('Audio track',a.meta.hasAudio?'yes':'no');
+        }else if(a.kind==='image'||a.kind==='matte'||a.kind==='bars'){
+          rows+=kv('Resolution',(a.meta.width||'?')+' × '+(a.meta.height||'?'));
+        }else if(a.kind==='audio'||a.kind==='tone'){
+          rows+=kv('Sample rate',(a.meta.sampleRate||48000)+' Hz');
+          rows+=kv('Channels',(a.meta.channels===1?'Mono':'Stereo'));
+          if(a.kind==='tone'&&a.meta.freq)rows+=kv('Frequency',a.meta.freq+' Hz');
+        }
+        if(a.kind==='matte'&&a.meta.color)rows+=kv('Color',a.meta.color);
+        if(a.fileName)rows+=kv('File',escHtml(a.fileName));
+        if(a.fileSize)rows+=kv('Size',fmtBytes(a.fileSize));
+        rows+=kv('Type',a.fileType?escHtml(a.fileType):'Generated');
+        rows+=kv('Bin',escHtml(Bin.binName(a.binId)));
+        const u=Store.p?MediaOps.usageOf(a.id):{clips:0,sequences:new Set()};
+        rows+=kv('Used by',u.clips?u.clips+' clip(s) in '+[...u.sequences].map(escHtml).join(', '):'no sequence');
+        if(a.offline)rows+=kv('Status','<span style="color:#d38981">Offline — use Relink to restore</span>');
+        body.innerHTML='<div class="pp-thumb" id="pp-thumb"></div>'+
+          '<div class="pp-name">'+escHtml(a.name)+'</div>'+
+          '<div class="pp-kv">'+rows+'</div>'+
+          '<div class="pp-actions" id="pp-actions"></div>';
+        /* live thumbnail: imported still / video poster, generated canvas, or waveform */
+        const tw=$('#pp-thumb');
+        if(tw){
+          if(a.thumb){tw.innerHTML='<img src="'+a.thumb+'" alt=""/>';}
+          else if(!a.offline&&(a.kind==='bars'||a.kind==='matte')){
+            const el=Media.elementForAsset(a.id);
+            if(el&&el.width){
+              const cv=document.createElement('canvas');cv.width=192;cv.height=108;
+              const c=cv.getContext('2d');
+              c.fillStyle='#000';c.fillRect(0,0,192,108);
+              const s=Math.min(192/el.width,108/el.height);
+              c.drawImage(el,(192-el.width*s)/2,(108-el.height*s)/2,el.width*s,el.height*s);
+              tw.appendChild(cv);
+            }
+          }else if(!a.offline&&(a.kind==='audio'||a.kind==='tone')&&a.peaks){
+            const cv=document.createElement('canvas');
+            tw.appendChild(cv);
+            Media.drawWave(cv,a,0,Math.min(a.duration||6,6),186,64);
+          }else{
+            tw.innerHTML='<span style="color:#565e66;font-size:10px">'+
+              (a.offline?'No preview — offline':(Bin.TYLBL[a.kind]||'Media'))+'</span>';
+          }
+        }
+        /* live-bound actions */
+        const acts=$('#pp-actions');
+        if(acts){
+          const mk=(label,fn,dis)=>{
+            const b=document.createElement('button');
+            b.className='tbtn';b.textContent=label;
+            if(dis){b.style.opacity=.45;b.style.pointerEvents='none';}
+            else b.addEventListener('click',fn);
+            acts.appendChild(b);
+          };
+          mk('Open in Source',()=>Source.open(a.id),!!a.offline);
+          mk('Insert at Playhead',()=>Bin.insertAtPlayhead(a),!!a.offline||!Store.seq);
+          mk('Rename…',()=>MediaOps.renameAssetDialog(a),false);
+          mk('Move to Bin…',()=>MediaOps.moveAssetsToBinDialog(a),false);
+          if(a.offline&&!['matte','bars','tone'].includes(a.kind))mk('Relink…',()=>Bin.relinkAsk(a),false);
+        }
+      }else if(seq){
+        chip.textContent=seq.name;
+        badge.textContent='Sequence';badge.className='badge acc';
+        const fps=Store.fps();
+        const kv=(k,v)=>'<div class="kv"><b>'+k+'</b><span>'+v+'</span></div>';
+        const dur=Model.seqDuration(seq);
+        body.innerHTML='<div class="pp-name">'+escHtml(seq.name)+'</div>'+
+          '<div class="pp-kv">'+
+          kv('Duration',fmtTC(dur,fps)+' · '+dur.toFixed(2)+' s')+
+          kv('Format',Store.W()+' × '+Store.H()+' · '+fps+' fps')+
+          kv('Tracks',seq.tracks.filter(t=>t.kind==='video').length+' video · '+
+            seq.tracks.filter(t=>t.kind==='audio').length+' audio')+
+          kv('Clips',String(seq.tracks.reduce((n,t)=>n+t.clips.length,0)))+
+          kv('Markers',String(seq.markers.length))+
+          kv('Status',seq.id===Store.p.activeSequenceId?'Active in timeline':'Not open')+
           '</div>'+
-          (a.kind!=='sequence'
-            ?'<div class="mbtnrow" style="padding:6px 8px"><span class="pl"></span>'+
-             '<button class="tbtn" id="pp-open-src">Open in Source Monitor</button></div>':'');
-        const btn=$('#pp-open-src');
-        if(btn)btn.addEventListener('click',()=>Source.open(a.id));
+          '<div class="pp-actions" id="pp-actions"></div>';
+        const acts=$('#pp-actions');
+        if(acts){
+          const mk=(label,fn,dis)=>{
+            const b=document.createElement('button');
+            b.className='tbtn';b.textContent=label;
+            if(dis){b.style.opacity=.45;b.style.pointerEvents='none';}
+            else b.addEventListener('click',fn);
+            acts.appendChild(b);
+          };
+          mk('Open',()=>MediaOps.openSequence(seq.id),false);
+          mk('Rename…',()=>MediaOps.renameSequenceDialog(seq),false);
+          mk('Duplicate',()=>MediaOps.duplicateSequence(seq.id),false);
+          mk('Delete',()=>MediaOps.deleteSequenceDialog(seq),Store.p.sequences.length<=1);
+        }
       }
     }else{
       chip.textContent='—';
@@ -348,7 +433,11 @@ const Panels={_focusOld:null,_focusPath:null,
       el.textContent=S.selClips.size+' clips selected';
     }else if(S.selAsset){
       const a=Model.asset(S.selAsset);
-      el.textContent=a?('Asset · '+a.name):'No selection';
+      if(a)el.textContent='Asset · '+a.name;
+      else{
+        const s=Store.p?Store.p.sequences.find(x=>x.id===S.selAsset):null;
+        el.textContent=s?('Sequence · '+s.name):'No selection';
+      }
     }else{
       el.textContent='No selection';
     }

@@ -98,6 +98,8 @@ document.addEventListener('keydown',e=>{
       case 'v':e.preventDefault();EditOps.paste();return;
       case 'd':e.preventDefault();EditOps.duplicate();return;
       case 'k':e.preventDefault();EditOps.razorAtPlayhead();return;
+      case 'n':if(e.altKey){e.preventDefault();MediaOps.newSequenceDialog();}return;
+      case '/':e.preventDefault();MediaOps.newBinDialog();return;
       default:return;
     }
   }
@@ -113,6 +115,7 @@ document.addEventListener('keydown',e=>{
     case '+':case '=':TL.setZoom(TL.pps*1.35);return;
     case '-':TL.setZoom(TL.pps/1.35);return;
     case '\\':TL.fitSeq();return;
+    case 'F2':e.preventDefault();MediaOps.renameSelection();return;
   }
   switch(e.key.toLowerCase()){
     case 'j':Playback.shuttle(-1);return;
@@ -183,6 +186,10 @@ window.addEventListener('beforeunload',e=>{
 /* ---------------- init ---------------- */
 (function init(){
   ID.init({});
+  /* launcher version label - driven by SC so it can never go stale again
+     (remove the display entirely once the final milestone ships) */
+  const lv=$('#lc-ver');
+  if(lv)lv.textContent=SC.version+' · Milestone '+SC.milestone;
   Compositor.mount();
   Bin.bind();
   TL.bind();

@@ -102,6 +102,65 @@
 .th.desc .si{display:block;transform:rotate(180deg)}
 .bin-empty{padding:18px 12px;font-size:10.5px;color:var(--txt-3)}
 
+/* ================= M3: BIN FILTER CHIPS ================= */
+.bin-chips{display:flex;align-items:center;gap:3px;margin-left:auto}
+.chip{
+  height:15px;padding:0 8px;display:inline-flex;align-items:center;
+  border:1px solid #3a4045;border-radius:8px;background:#23272b;
+  color:var(--txt-3);font-size:9px;letter-spacing:.3px;
+}
+.chip:hover{color:var(--txt-2);background:var(--bg-hover)}
+.chip.on{color:#cfe2f5;border-color:#3e5f82;background:rgba(74,144,217,.14)}
+
+/* ================= M3: TREE UPGRADES ================= */
+.tree-row.leaf>.car{visibility:hidden}
+.tree-row.droptree{background:rgba(74,144,217,.22);box-shadow:inset 0 0 0 1px var(--accent-line)}
+.tree-row .offn{
+  margin-left:4px;padding:0 3px;height:12px;display:inline-flex;align-items:center;
+  background:rgba(148,72,64,.2);border:1px solid #6c4540;border-radius:2px;
+  color:#d38981;font:600 8px var(--mono);
+}
+.tree-rename{
+  width:88px;height:16px;flex:1;background:var(--bg-input);
+  border:1px solid var(--accent-line);border-radius:2px;color:var(--txt);
+  font-size:10.5px;padding:0 4px;
+}
+.tree-rename:focus{outline:none}
+
+/* ================= M3: PROPERTIES (assets + sequences) ================= */
+.pp-thumb{
+  margin:8px;border:1px solid #33383d;border-radius:3px;background:#0c0d0f;
+  height:108px;display:flex;align-items:center;justify-content:center;overflow:hidden;flex:none;
+}
+.pp-thumb img,.pp-thumb canvas{max-width:100%;max-height:100%;display:block}
+.pp-name{padding:0 8px 2px;font-size:11.5px;color:#dfe4e8;font-weight:600;word-break:break-word}
+.pp-kv{padding:4px 8px}
+.pp-kv .kv{display:flex;justify-content:space-between;gap:10px;padding:2px 0;font-size:10px}
+.pp-kv .kv b{color:var(--txt-3);font-weight:500;flex:none}
+.pp-kv .kv span{color:var(--txt-2);text-align:right;word-break:break-word;min-width:0}
+.pp-actions{display:flex;flex-wrap:wrap;gap:5px;padding:6px 8px 10px}
+
+/* ================= M3: SEQUENCE MANAGER / LINK MEDIA / MOVE PICKER ================= */
+.sm-list,.lm-list,.mm-list{display:flex;flex-direction:column;gap:4px}
+.mm-list{max-height:300px;overflow-y:auto}
+.sm-row{display:flex;align-items:center;gap:10px;padding:7px 9px;border:1px solid #2e343a;border-radius:3px;background:#22262a}
+.sm-row.on{border-color:#3e5f82;background:rgba(74,144,217,.08)}
+.sm-name{flex:1;min-width:0;color:#dde2e7;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sm-name .badge{margin-left:6px}
+.sm-meta{font:9.5px var(--mono);color:var(--txt-3);white-space:nowrap}
+.sm-btns{display:flex;gap:4px;flex:none}
+.lm-row{display:flex;align-items:center;gap:9px;padding:7px 9px;border:1px solid #2e343a;border-radius:3px;background:#22262a}
+.lm-name{flex:1;min-width:0;font-size:11px;color:#dde2e7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lm-sub{display:block;font:9px var(--mono);color:var(--txt-3)}
+.mm-row{display:flex;align-items:center;gap:8px;padding:6px 9px;border:1px solid #2e343a;border-radius:3px;background:#22262b;color:var(--txt-2)}
+.mm-row:hover{border-color:var(--accent-line);color:#dbe8f6}
+.mm-path{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ================= M3: TOPBAR SEQUENCE SWITCHER ================= */
+#tb-seq-path{cursor:pointer}
+#tb-seq-path:hover{color:#dbe8f6}
+#tb-seq-path::after{content:" ▼";font-size:8px;color:var(--txt-3)}
+
 /* ================= PROPERTIES / EFFECT CONTROLS ================= */
 .sec{border-bottom:1px solid #1f2225}
 .sec-h{display:flex;align-items:center;gap:6px;height:23px;padding:0 8px;background:#22262a;color:var(--txt-2);font-size:10.5px;font-weight:600}

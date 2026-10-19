@@ -5,7 +5,7 @@
    ===================================================================== */
 const $=(s,r=document)=>r.querySelector(s);
 const $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const SC={version:'0.2.0',milestone:2};
+const SC={version:'0.3.0',milestone:3}; /* launcher + About read this; after the final milestone the version display is removed entirely */
 
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const dbToLin=db=>Math.pow(10,db/20);
@@ -104,6 +104,7 @@ const S={
   folder:'footage',search:'',sort:{k:'name',d:1},
   fxSearch:'',fxSel:null,
   zoom:14,selClips:new Set(),selAsset:null,srcAssetId:null,
+  filter:'all',           /* M3 bin filter chip: 'all' | 'video' | 'audio' | 'still' */
   mode:'overwrite',     /* M2 drop/paste resolution: 'overwrite' | 'insert' */
   dragging:null
 };

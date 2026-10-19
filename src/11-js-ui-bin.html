@@ -1,12 +1,16 @@
 <script>
 "use strict";
 /* =====================================================================
-   SynapticCut - 11 UI BIN: folder tree, asset table (sort/search/flag),
-   import wiring, drag-to-timeline, context menus, relink
+   SynapticCut - 11 UI BIN (M3): recursive folder tree with context menus,
+   inline rename, drag-asset-to-bin, filter chips, search (name + file
+   name), sort, view-state persistence, import wiring, drag-to-timeline
    ===================================================================== */
 const Bin={
   TYLBL:{video:'Movie',audio:'Audio',image:'Graphics',matte:'Matte',bars:'Bars',tone:'Tone',sequence:'Sequence'},
   TYCH:{video:'M',audio:'A',image:'G',matte:'G',bars:'G',tone:'A',sequence:'S'},
+  FILTERS:[['all','All'],['video','Movies'],['audio','Audio'],['still','Stills']],
+  PREFKEY:'synapticcut.uiprefs',
+  _importTarget:null,
 
   fmtOf(a){
     if(a.kind==='video')return (a.meta.width||'?')+'×'+(a.meta.height||'?')+(a.meta.fps?' · '+a.meta.fps+'p':'');
@@ -32,49 +36,146 @@ const Bin={
     return (par?par.name+' / ':'')+b.name;
   },
 
+  /* ---------------- folder tree (recursive, M3) ---------------- */
   renderTree(){
     const tr=$('#tree');
     if(!tr||!Store.p)return;
     tr.innerHTML='';
     const roots=Store.p.bins.filter(b=>!b.parentId);
     const render=(b,depth)=>{
+      const kids=Store.p.bins.filter(c=>c.parentId===b.id);
       const row=document.createElement('div');
-      row.className='tree-row'+(b.open&&depth===0?' open':'')+(S.folder===b.id?' sel':'');
-      row.style.paddingLeft=depth===0?'2px':'20px';
-      const count=b.id==='sequences'
-        ?Store.p.sequences.length
-        :Model.binAssets(Store.p,b.id).length;
-      row.innerHTML='<span class="car"><i></i></span><span class="tn2">'+b.name+'</span><span class="tc2">'+count+'</span>';
+      row.className='tree-row'+(b.open?' open':'')+(S.folder===b.id?' sel':'')+(kids.length?'':' leaf');
+      row.style.paddingLeft=(2+depth*13)+'px';
+      row.dataset.bin=b.id;
+      const assets=Model.binAssets(Store.p,b.id);
+      const count=b.id==='sequences'?Store.p.sequences.length+assets.length:assets.length;
+      const off=assets.filter(x=>x.offline).length;
+      row.innerHTML='<span class="car"><i></i></span><span class="tn2">'+escHtml(b.name)+'</span>'+
+        (off?'<span class="offn" data-tip="Offline media: '+off+'">'+off+'</span>':'')+
+        '<span class="tc2">'+count+'</span>';
+      row.querySelector('.car').addEventListener('click',e=>{
+        e.stopPropagation();
+        if(!kids.length)return;
+        b.open=!b.open;
+        Bin.renderTree();
+      });
       row.addEventListener('click',()=>{
-        S.folder=b.id;S.search='';const si=$('#bin-search');if(si)si.value='';
-        b.open=true;Bin.renderTree();Bin.render();
+        S.folder=b.id;S.search='';
+        const si=$('#bin-search');if(si)si.value='';
+        const w=$('#bin-searchwrap');if(w)w.classList.remove('open');
+        b.open=true;
+        Bin.renderTree();Bin.render();
+      });
+      row.addEventListener('dblclick',e=>{
+        e.stopPropagation();
+        if(b.id==='sequences'){MediaOps.sequenceManager();return;}
+        Bin.inlineRename(row,b);
+      });
+      row.addEventListener('contextmenu',e=>{
+        e.preventDefault();
+        Bin.openBinMenu(b,e.clientX,e.clientY);
       });
       tr.appendChild(row);
-      if(b.open&&depth===0){
-        Store.p.bins.filter(c=>c.parentId===b.id).forEach(c=>render(c,1));
-      }
+      if(b.open&&kids.length)kids.forEach(c=>render(c,depth+1));
     };
     roots.forEach(b=>render(b,0));
   },
 
+  inlineRename(row,b){
+    if(!b||!row||row.querySelector('.tree-rename'))return;
+    const label=row.querySelector('.tn2');
+    if(!label)return;
+    const inp=document.createElement('input');
+    inp.className='tree-rename';
+    inp.value=b.name;
+    inp.spellcheck=false;
+    label.style.display='none';
+    row.insertBefore(inp,label);
+    inp.focus();inp.select();
+    let done=false;
+    const commit=ok=>{
+      if(done)return;done=true;
+      const v=inp.value.trim();
+      inp.remove();
+      label.style.display='';
+      if(ok&&v&&v!==b.name)MediaOps.renameBin(b.id,v);
+      else Bin.renderTree();
+    };
+    ['pointerdown','click','dblclick'].forEach(ev=>inp.addEventListener(ev,e=>e.stopPropagation()));
+    inp.addEventListener('keydown',e=>{
+      e.stopPropagation();
+      if(e.key==='Enter')commit(true);
+      else if(e.key==='Escape')commit(false);
+    });
+    inp.addEventListener('blur',()=>commit(true));
+  },
+
+  openBinMenu(b,x,y){
+    const isSeqRoot=b.id==='sequences';
+    const items=[];
+    if(isSeqRoot){
+      items.push({t:'New Sequence…',act:()=>MediaOps.newSequenceDialog()});
+      items.push({t:'Sequence Manager…',act:()=>MediaOps.sequenceManager()});
+    }else{
+      items.push({t:'New Bin…',k:'Ctrl+/',act:()=>MediaOps.newBinDialog(b.id)});
+      items.push({t:'Rename…',k:'F2',act:()=>{
+        S.folder=b.id;Bin.renderTree();
+        const row=$('#tree .tree-row[data-bin="'+b.id+'"]');
+        if(row)Bin.inlineRename(row,b);
+      }});
+    }
+    items.push({sep:1});
+    items.push({t:'Import Media into Bin…',k:'Ctrl+I',act:()=>{
+      Bin._importTarget=b.id;
+      const i=$('#file-import');if(i)i.click();
+    }});
+    items.push({sep:1});
+    items.push({t:'Delete Bin…',dis:!b.parentId,act:()=>MediaOps.deleteBinDialog(b)});
+    openMenu(null,items,x,y);
+  },
+
+  /* ---------------- listing (filter + search + sequences) ---------------- */
+  kindInFilter(kind){
+    if(S.filter==='all')return true;
+    if(S.filter==='video')return kind==='video';
+    if(S.filter==='audio')return kind==='audio'||kind==='tone';
+    return kind==='image'||kind==='matte'||kind==='bars';
+  },
   currentItems(){
     if(!Store.p)return[];
+    const p=Store.p;
+    let assets=[];
     if(S.search){
       const q=S.search.toLowerCase();
-      const arr=Object.values(Store.p.assets).filter(a=>a.name.toLowerCase().includes(q));
-      return Bin.withSequences(arr);
+      assets=Object.values(p.assets).filter(a=>
+        a.name.toLowerCase().includes(q)||(a.fileName||'').toLowerCase().includes(q));
+    }else{
+      assets=Model.binAssets(p,S.folder);
     }
-    if(S.folder==='sequences')return Bin.withSequences([]);
-    return Model.binAssets(Store.p,S.folder);
-  },
-  withSequences(arr){
-    const p=Store.p;
-    const seqItems=p.sequences.map(s=>({
+    if(S.filter!=='all')assets=assets.filter(a=>this.kindInFilter(a.kind));
+    let seqs=[];
+    if(S.filter==='all'){
+      if(S.search){
+        const q=S.search.toLowerCase();
+        seqs=p.sequences.filter(s=>s.name.toLowerCase().includes(q));
+      }else if(S.folder==='sequences'){
+        seqs=p.sequences;
+      }
+    }
+    const seqItems=seqs.map(s=>({
       id:s.id,name:s.name,kind:'sequence',duration:Model.seqDuration(s),
       binId:'sequences',meta:{width:p.settings.width,height:p.settings.height,fps:p.settings.fps},
       offline:false
     }));
-    return arr.concat(seqItems);
+    return assets.concat(seqItems);
+  },
+
+  renderFilters(){
+    const el=$('#bin-filters');
+    if(!el)return;
+    el.innerHTML=this.FILTERS.map(f=>
+      '<button class="chip'+(S.filter===f[0]?' on':'')+'" data-f="'+f[0]+'">'+f[1]+'</button>').join('');
   },
 
   render(){
@@ -93,6 +194,8 @@ const Bin={
     });
     $('#bin-path').textContent=S.search?('Search: "'+S.search+'"'):this.binName(S.folder);
     $('#bin-count').textContent=list.length+' item'+(list.length===1?'':'s');
+    this.renderFilters();
+    this.savePrefs();
     const wrap=$('#bin-rows');
     wrap.innerHTML='';
     if(!list.length){
@@ -119,11 +222,7 @@ const Bin={
       });
       r.addEventListener('dblclick',()=>{
         if(seq){
-          Store.p.activeSequenceId=a.id;
-          Store.setDirty(true);
-          Bus.emit('sequence');
-          Playback.seek(0);
-          action('Opened sequence '+a.name);
+          MediaOps.openSequence(a.id);
         }else{
           Source.open(a.id);
         }
@@ -133,7 +232,7 @@ const Bin={
         S.selAsset=a.id;Bin.render();Bus.emit('sel');
         Bin.openAssetMenu(a,e.clientX,e.clientY);
       });
-      /* pointer drag -> timeline */
+      /* pointer drag -> timeline, or -> bin tree row (move) */
       r.addEventListener('pointerdown',e=>{
         if(e.button!==0||seq)return;
         Bin.beginDrag(e,a);
@@ -143,17 +242,34 @@ const Bin={
   },
 
   openAssetMenu(a,x,y){
+    if(a.kind==='sequence'){
+      const s=Store.p?Store.p.sequences.find(q=>q.id===a.id):null;
+      openMenu(null,[
+        {t:'Open in Timeline',act:()=>MediaOps.openSequence(a.id)},
+        {sep:1},
+        {t:'Rename…',k:'F2',dis:!s,act:()=>MediaOps.renameSequenceDialog(s)},
+        {t:'Duplicate',dis:!s,act:()=>MediaOps.duplicateSequence(a.id)},
+        {t:'Delete',dis:!s||Store.p.sequences.length<=1,act:()=>MediaOps.deleteSequenceDialog(s)},
+        {sep:1},
+        {t:'Sequence Manager…',act:()=>MediaOps.sequenceManager()}
+      ],x,y);
+      return;
+    }
     const offline=!!a.offline&&!['matte','bars','tone'].includes(a.kind);
     openMenu(null,[
       {t:'Open in Source Monitor',dis:!!a.offline,act:()=>Source.open(a.id)},
       {t:'Insert at Playhead',k:',',dis:!!a.offline||!Store.seq,act:()=>Bin.insertAtPlayhead(a)},
       {t:'Overwrite onto First Free Slot',dis:!!a.offline||!Store.seq,act:()=>Bin.insertAtPlayhead(a,true)},
       {sep:1},
+      {t:'Rename…',k:'F2',act:()=>MediaOps.renameAssetDialog(a)},
+      {t:'Move to Bin…',act:()=>MediaOps.moveAssetsToBinDialog(a)},
       {t:'Relink Media…',dis:!offline,act:()=>Bin.relinkAsk(a)},
-      {t:'Remove from Project',act:()=>Bin.removeAsset(a)}
+      {sep:1},
+      {t:'Remove from Project',act:()=>MediaOps.removeAssetDialog(a)}
     ],x,y);
   },
   insertAtPlayhead(a,findGap){
+    /* replaced by the M2 override in 12b-js-edit (EditOps.placeAsset) */
     const s=Store.seq;if(!s||a.offline)return;
     const kind=Model.trackKindFor(a);
     const tracks=s.tracks.filter(t=>t.kind===kind&&!t.locked);
@@ -165,41 +281,6 @@ const Bin={
     cmdAddClips([{clip}]);
     Playback.seek(start);
     action('Inserted '+a.name+' at '+fmtTC(start,Store.fps()));
-  },
-  removeAsset(a){
-    if(a.kind==='sequence'){
-      const p=Store.p;
-      if(p.sequences.length<=1){action('Cannot remove the only sequence');return;}
-      p.sequences=p.sequences.filter(s=>s.id!==a.id);
-      if(p.activeSequenceId===a.id)p.activeSequenceId=p.sequences[0].id;
-      Store.setDirty(true);
-      Bus.emit('sequence');
-      return;
-    }
-    Cmd.run({
-      label:'Remove Asset',
-      do(){
-        Model.removeAsset(Store.p,a.id);
-        Engine.Audio.purgeAsset(a.id);
-        if(S.selAsset===a.id)S.selAsset=null;
-        Bus.emit('assets');Bus.emit('sel');
-      },
-      undo(){
-        Store.p.assets[a.id]=a;
-        Bus.emit('assets');
-      }
-    });
-  },
-  newBin(){
-    if(!Store.p)return;
-    const parent=Store.p.bins.find(b=>b.id===S.folder)||Store.p.bins[0];
-    const b={id:ID.next('bin'),name:'Bin_'+String(Store.p.bins.length).padStart(2,'0'),parentId:parent.id,open:true};
-    Store.p.bins.push(b);
-    parent.open=true;
-    S.folder=b.id;
-    Store.setDirty(true);
-    Bus.emit('assets');
-    action('Created '+b.name);
   },
   hasOffline(){
     if(!Store.p)return false;
@@ -215,23 +296,50 @@ const Bin={
     };
     inp.click();
   },
-  relinkAll(){
-    if(!Store.p)return;
-    const off=Object.values(Store.p.assets).filter(a=>a.offline);
-    if(!off.length){action('No offline media');return;}
-    openModal('Link Media',
-      '<div class="sc-list">'+
-      off.map(a=>'<b>'+a.kind+'</b> '+a.name+(a.fileName?' ('+a.fileName+')':'')+'<br>').join('')+
-      '<br>Select a file to relink <b>'+off[0].name+'</b> ('+off.length+' offline in total).'+
-      '</div>',
-      [{t:'Cancel'},{t:'Choose File…',pri:true,act:()=>Bin.relinkAsk(off[0])}]);
+
+  /* ---------------- view-state persistence (M3) ---------------- */
+  savePrefs(){
+    try{
+      localStorage.setItem(this.PREFKEY,JSON.stringify(
+        {folder:S.folder,search:S.search,sort:S.sort,filter:S.filter}));
+    }catch(e){}
+  },
+  applyPrefs(raw){
+    /* raw: prefs captured BEFORE a project load (the load's own renders
+       would otherwise overwrite the stored state before we can read it) */
+    try{
+      const o=JSON.parse(raw!=null?raw:localStorage.getItem(this.PREFKEY))||{};
+      if(o.folder&&Store.p&&Store.p.bins.some(b=>b.id===o.folder))S.folder=o.folder;
+      if(typeof o.search==='string'&&o.search){
+        S.search=o.search;
+        const si=$('#bin-search'),w=$('#bin-searchwrap');
+        if(si)si.value=o.search;
+        if(w)w.classList.add('open');
+      }
+      if(o.sort&&o.sort.k)S.sort=o.sort;
+      if(o.filter&&this.FILTERS.some(f=>f[0]===o.filter))S.filter=o.filter;
+    }catch(e){}
+    $$('#bin-head .th').forEach(x=>{
+      x.classList.remove('asc','desc');
+      if(x.dataset.k===S.sort.k)x.classList.add(S.sort.d===1?'asc':'desc');
+    });
+    this.renderTree();
+    this.render();
   },
 
-  /* ---------------- drag to timeline ---------------- */
+  /* ---------------- drag: to timeline, or onto a tree row (move) ---------------- */
   beginDrag(e,a){
     if(S.dragging)return;
     const start={x:e.clientX,y:e.clientY};
-    let ghost=null,targets=null;
+    let ghost=null,targets=null,treeRows=null,treeHit=null;
+    const overTree=ev=>{
+      const els=document.elementsFromPoint(ev.clientX,ev.clientY);
+      const t=els.find(el=>el.classList&&el.classList.contains('tree-row'));
+      if(!t)return null;
+      const bid=t.dataset.bin;
+      if(!bid||bid===a.binId)return null;
+      return t;
+    };
     const move=ev=>{
       if(!ghost&&Math.hypot(ev.clientX-start.x,ev.clientY-start.y)>5){
         ghost=$('#drag-ghost');
@@ -242,11 +350,20 @@ const Bin={
         $('#sc-root').classList.add('dragging');
         S.dragging={assetId:a.id};
         targets=$$('#tl-tracks .track');
+        treeRows=$$('#tree .tree-row');
       }
       if(ghost){
         ghost.style.left=(ev.clientX+12)+'px';
         ghost.style.top=(ev.clientY+10)+'px';
-        targets.forEach(t=>Bin.markDrop(t,ev,a));
+        treeHit=overTree(ev);
+        treeRows.forEach(r=>r.classList.toggle('droptree',r===treeHit));
+        if(treeHit){
+          ghost.querySelector('.dg-name').textContent='Move to '+Bin.binName(treeHit.dataset.bin);
+          targets.forEach(t=>t.classList.remove('drop-ok','drop-no'));
+        }else{
+          ghost.querySelector('.dg-name').textContent=a.name;
+          targets.forEach(t=>Bin.markDrop(t,ev,a));
+        }
       }
     };
     const up=ev=>{
@@ -257,6 +374,9 @@ const Bin={
         $('#sc-root').classList.remove('dragging');
         S.dragging=null;
         $$('#tl-tracks .track').forEach(t=>t.classList.remove('drop-ok','drop-no'));
+        $$('#tree .tree-row').forEach(r=>r.classList.remove('droptree'));
+        const th=overTree(ev);
+        if(th){MediaOps.moveAssets([a.id],th.dataset.bin);return;}
         const hit=Bin.dropTarget(ev,a);
         if(hit)TL.dropAsset(a,hit.track,hit.x);
       }
@@ -288,22 +408,28 @@ const Bin={
   /* ---------------- wiring ---------------- */
   bind(){
     const imp=$('#btn-import'),inp=$('#file-import');
-    if(imp)imp.addEventListener('click',()=>inp&&inp.click());
+    if(imp)imp.addEventListener('click',()=>{Bin._importTarget=null;inp&&inp.click();});
     if(inp){
       inp.addEventListener('change',()=>{
-        if(inp.files&&inp.files.length)Media.importFiles([...inp.files]);
+        if(inp.files&&inp.files.length){
+          Media.importFiles([...inp.files],Bin._importTarget||undefined);
+        }
+        Bin._importTarget=null;
         inp.value='';
       });
     }
     const nb=$('#btn-newbin');
     if(nb)nb.addEventListener('click',()=>Bin.newBin());
-    /* drop files directly onto the bin panel */
+    /* drop files onto the bin panel: onto a tree row -> that bin, else default routing */
     const panel=$('#panel-bin');
     if(panel){
       panel.addEventListener('dragover',e=>{e.preventDefault();e.dataTransfer.dropEffect='copy';});
       panel.addEventListener('drop',e=>{
         e.preventDefault();
-        if(e.dataTransfer&&e.dataTransfer.files.length)Media.importFiles([...e.dataTransfer.files]);
+        if(!(e.dataTransfer&&e.dataTransfer.files.length))return;
+        const els=document.elementsFromPoint(e.clientX,e.clientY);
+        const tRow=els.find(el=>el.classList&&el.classList.contains('tree-row'));
+        Media.importFiles([...e.dataTransfer.files],tRow?tRow.dataset.bin:undefined);
       });
     }
     const si=$('#bin-search-ic');
@@ -315,6 +441,13 @@ const Bin={
     });
     const sin=$('#bin-search');
     if(sin)sin.addEventListener('input',e=>{S.search=e.target.value.trim();Bin.render();});
+    const bf=$('#bin-filters');
+    if(bf)bf.addEventListener('click',e=>{
+      const c=e.target.closest('.chip');
+      if(!c)return;
+      S.filter=c.dataset.f;
+      Bin.render();
+    });
     $$('#bin-head .th').forEach(h=>h.addEventListener('click',()=>{
       const k=h.dataset.k;
       if(S.sort.k===k)S.sort.d*=-1;else S.sort={k,d:1};

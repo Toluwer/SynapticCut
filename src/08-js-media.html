@@ -21,7 +21,7 @@ const Media={
     if(['png','jpg','jpeg','gif','webp','svg','bmp','tiff'].includes(ext))return 'image';
     return null;
   },
-  async importFiles(files){
+  async importFiles(files,targetBin){
     const imported=[];
     for(const file of files){
       const kind=this.kindForFile(file);
@@ -29,7 +29,7 @@ const Media={
       const asset={
         id:ID.next('asset'),
         name:file.name.replace(/\.[^.]+$/,''),
-        kind,binId:kind==='audio'?'audio':(kind==='image'?'graphics':'footage'),
+        kind,binId:targetBin||(kind==='audio'?'audio':(kind==='image'?'graphics':'footage')),
         fileName:file.name,fileSize:file.size,fileType:file.type,
         offline:false,thumb:null,peaks:null,duration:5,
         meta:{}
