@@ -92,7 +92,12 @@ document.addEventListener('keydown',e=>{
       case 'y':e.preventDefault();Cmd.redo();return;
       case 's':e.preventDefault();Shell.saveProject();return;
       case 'i':e.preventDefault();Bin.hasImportInput();return;
-      case 'a':e.preventDefault();TL.selectAll();return;
+      case 'a':e.preventDefault();e.shiftKey?TL.clearSel():TL.selectAll();if(e.shiftKey)Bus.emit('sel');return;
+      case 'c':e.preventDefault();EditOps.copy(false);return;
+      case 'x':e.preventDefault();EditOps.copy(true);return;
+      case 'v':e.preventDefault();EditOps.paste();return;
+      case 'd':e.preventDefault();EditOps.duplicate();return;
+      case 'k':e.preventDefault();EditOps.razorAtPlayhead();return;
       default:return;
     }
   }
@@ -103,7 +108,7 @@ document.addEventListener('keydown',e=>{
     case 'Home':Playback.seek(0);return;
     case 'End':Playback.seek(Playback.dur());return;
     case 'Delete':
-    case 'Backspace':e.preventDefault();TL.deleteSel();return;
+    case 'Backspace':e.preventDefault();e.shiftKey?EditOps.rippleDelete():TL.deleteSel();return;
     case 'Escape':closeMenu();closeModal();return;
     case '+':case '=':TL.setZoom(TL.pps*1.35);return;
     case '-':TL.setZoom(TL.pps/1.35);return;
@@ -115,7 +120,12 @@ document.addEventListener('keydown',e=>{
     case 'l':Playback.shuttle(1);return;
     case 'i':TL.setIn();return;
     case 'o':TL.setOut();return;
-    case 'm':TL.addMarker();return;
+    case 'm':e.shiftKey?EditOps.nextMarker():TL.addMarker();return;
+    case 'e':if(e.shiftKey)TL.toggleEnable();return;
+    case 'q':EditOps.rippleTrimPlayhead('l');return;
+    case 'w':EditOps.rippleTrimPlayhead('r');return;
+    case ',':EditOps.fromSource('insert');return;
+    case '.':EditOps.fromSource('overwrite');return;
     case 's':Shell.toggleSnap();return;
     case 'v':setTool('select');return;
     case 'c':setTool('razor');return;

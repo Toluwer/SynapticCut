@@ -269,7 +269,7 @@ const AudioGraph={
   attachClip(c,el){
     if(!this.ctx)return;
     const prev=this.clipNodes.get(c.id);
-    if(prev&&prev.el===el)return;
+    if(prev&&prev.el===el&&prev.trackId===c.trackId)return;
     this.detachClip(c.id);
     try{
       const src=this.ctx.createMediaElementSource(el);
@@ -278,8 +278,21 @@ const AudioGraph={
       const bus=this.buses.get(c.trackId);
       gain.connect(bus?bus.gain:this.master);
       gain.gain.value=c.audio.muted?0:dbToLin(c.audio.volumeDb);
-      this.clipNodes.set(c.id,{src,gain,el});
+      this.clipNodes.set(c.id,{src,gain,el,trackId:c.trackId});
     }catch(e){/* element already has a source node bound elsewhere */}
+  },
+  /* after structural edits (move/split/paste/undo) re-route every clip
+     to its current track bus and drop nodes of clips that no longer exist */
+  reattachAll(){
+    if(!this.ctx)return;
+    const s=Store.seq;
+    if(!s)return;
+    const alive=new Set();
+    for(const tr of s.tracks)for(const c of tr.clips){
+      const rec=Media.clipEls.get(c.id);
+      if(rec){this.attachClip(c,rec.el);alive.add(c.id);}
+    }
+    for(const id of [...this.clipNodes.keys()])if(!alive.has(id))this.detachClip(id);
   },
   detachClip(clipId){
     const n=this.clipNodes.get(clipId);

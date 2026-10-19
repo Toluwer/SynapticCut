@@ -580,6 +580,21 @@ select.scm-in{cursor:default}
 .track.drop-ok{background:rgba(74,144,217,.10);box-shadow:inset 0 0 0 1px rgba(95,159,221,.5)}
 .track.drop-no{box-shadow:inset 0 0 0 1px rgba(176,97,90,.45)}
 #tl-ruler{cursor:ew-resize}
+/* ---- M2 editing: trim handles, move, marquee, snap guide, tip ---- */
+.clip{user-select:none}
+.clip::before,.clip::after{content:"";position:absolute;top:0;bottom:0;width:7px;z-index:4}
+.clip::before{left:0;cursor:w-resize}
+.clip::after{right:0;cursor:e-resize}
+.clip:hover::before,.clip:hover::after{background:rgba(255,255,255,.22)}
+.clip.moving{opacity:.72;pointer-events:none;z-index:8;filter:brightness(1.25)}
+#tl-snapline{position:absolute;top:0;bottom:0;width:1px;background:#e8b96a;z-index:9;pointer-events:none;display:none;box-shadow:0 0 0 .5px rgba(232,185,106,.5)}
+#tl-marquee{position:absolute;border:1px solid rgba(126,176,235,.85);background:rgba(95,159,221,.13);pointer-events:none;z-index:7;display:none}
+#edit-tip{position:fixed;z-index:400;background:#12161a;border:1px solid #343a40;border-radius:3px;padding:3px 7px;font:9.5px var(--mono);color:var(--txt-1);pointer-events:none;display:none;box-shadow:0 4px 12px rgba(0,0,0,.45);white-space:nowrap}
+:root[data-tool="razor"] .clip,:root[data-tool="razor"] .clip::before,:root[data-tool="razor"] .clip::after,:root[data-tool="razor"] .track{cursor:crosshair}
+:root[data-tool="hand"] .tl-scroll{cursor:grab}
+:root[data-tool="hand"] .tl-scroll:active{cursor:grabbing}
+.track.locked{background:repeating-linear-gradient(45deg,#1a1d1f 0 6px,#171a1d 6px 12px)}
+.track.a.locked{background:repeating-linear-gradient(45deg,#191d1c 0 6px,#161a19 6px 12px)}
 </style>
 </head>
 <body>
@@ -998,6 +1013,13 @@ select.scm-in{cursor:default}
         <svg width="12" height="12" viewBox="0 0 16 16"><rect x="6" y="4" width="4" height="4" transform="rotate(45 8 8)" fill="currentColor"/></svg>
       </button>
       <span class="vsep"></span>
+      <button class="tlt mode-btn on" id="tl-mode-ovr" data-tip="Overwrite mode: drops cut the clips underneath">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 2v5.4M5.6 5.2 8 7.6l2.4-2.4"/><path d="M3.2 11.6h9.6"/></svg>
+      </button>
+      <button class="tlt mode-btn" id="tl-mode-ins" data-tip="Insert mode: drops push clips to the right">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.6 3.4v9.2M13.4 3.4v9.2"/><path d="M5.2 8h5.6M8.4 5.6 10.8 8 8.4 10.4"/></svg>
+      </button>
+      <span class="vsep"></span>
       <button class="tlt" data-tip="Track Targeting: V1 · A1">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M3 3.5h4v3H3zM9 3.5h4v3H9zM3 9.5h4v3H3zM9 9.5h4v3H9z"/></svg>
       </button>
@@ -1032,7 +1054,7 @@ select.scm-in{cursor:default}
    ===================================================================== */
 const $=(s,r=document)=>r.querySelector(s);
 const $$=(s,r=document)=>[...r.querySelectorAll(s)];
-const SC={version:'0.1.0',milestone:1};
+const SC={version:'0.2.0',milestone:2};
 
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const dbToLin=db=>Math.pow(10,db/20);
@@ -1131,6 +1153,7 @@ const S={
   folder:'footage',search:'',sort:{k:'name',d:1},
   fxSearch:'',fxSel:null,
   zoom:14,selClips:new Set(),selAsset:null,srcAssetId:null,
+  mode:'overwrite',     /* M2 drop/paste resolution: 'overwrite' | 'insert' */
   dragging:null
 };
 
@@ -1362,8 +1385,12 @@ const Model={
 
   /* ---------- serialization ---------- */
   serialize(p){
+    /* refresh id counters so a save/load cycle never re-issues ids that
+       clips/bin/tracks created after project birth already use */
+    const q=JSON.parse(JSON.stringify(p));
+    q.idCounters=ID.counters();
     return JSON.stringify({app:'SynapticCut',version:SC.version,savedAt:new Date().toISOString(),
-      project:JSON.parse(JSON.stringify(p))});
+      project:q});
   },
   deserialize(json){
     const o=JSON.parse(json);
@@ -2103,7 +2130,7 @@ const AudioGraph={
   attachClip(c,el){
     if(!this.ctx)return;
     const prev=this.clipNodes.get(c.id);
-    if(prev&&prev.el===el)return;
+    if(prev&&prev.el===el&&prev.trackId===c.trackId)return;
     this.detachClip(c.id);
     try{
       const src=this.ctx.createMediaElementSource(el);
@@ -2112,8 +2139,21 @@ const AudioGraph={
       const bus=this.buses.get(c.trackId);
       gain.connect(bus?bus.gain:this.master);
       gain.gain.value=c.audio.muted?0:dbToLin(c.audio.volumeDb);
-      this.clipNodes.set(c.id,{src,gain,el});
+      this.clipNodes.set(c.id,{src,gain,el,trackId:c.trackId});
     }catch(e){/* element already has a source node bound elsewhere */}
+  },
+  /* after structural edits (move/split/paste/undo) re-route every clip
+     to its current track bus and drop nodes of clips that no longer exist */
+  reattachAll(){
+    if(!this.ctx)return;
+    const s=Store.seq;
+    if(!s)return;
+    const alive=new Set();
+    for(const tr of s.tracks)for(const c of tr.clips){
+      const rec=Media.clipEls.get(c.id);
+      if(rec){this.attachClip(c,rec.el);alive.add(c.id);}
+    }
+    for(const id of [...this.clipNodes.keys()])if(!alive.has(id))this.detachClip(id);
   },
   detachClip(clipId){
     const n=this.clipNodes.get(clipId);
@@ -3114,7 +3154,7 @@ const TL={
 
       const td=document.createElement('div');
       const fa=s.tracks.find(t=>t.kind==='audio');
-      td.className='track '+tr.kind+(tr.kind==='audio'&&fa&&tr.id===fa.id?' first':'');
+      td.className='track '+tr.kind+(tr.kind==='audio'&&fa&&tr.id===fa.id?' first':'')+(tr.locked?' locked':'');
       td.style.height=tr.height+'px';
       td.dataset.track=tr.id;
       td.addEventListener('contextmenu',e=>{
@@ -3124,7 +3164,7 @@ const TL={
       });
       td.addEventListener('mousedown',e=>{
         if(e.target.closest('.clip'))return;
-        if(e.button===0){TL.clearSel();Bus.emit('sel');}
+        if(e.button===0&&!e.shiftKey){TL.clearSel();Bus.emit('sel');}
       });
       tk.appendChild(td);
     });
@@ -3143,6 +3183,8 @@ const TL={
       set('mute',tr.mute,tr.mute);
       set('solo',tr.solo,tr.solo);
       set('lock',tr.locked,tr.locked);
+      const lane=$('#tl-tracks .track[data-track="'+tr.id+'"]');
+      if(lane)lane.classList.toggle('locked',!!tr.locked);
     });
   },
   openTrackMenu(tr,x,y){
@@ -3233,8 +3275,8 @@ const TL={
       el.addEventListener('contextmenu',e=>{
         e.preventDefault();
         openMenu(null,[
-          {t:'Delete Marker',act:()=>{s.markers=s.markers.filter(x=>x!==m);Store.setDirty(true);TL.render();}},
-          {t:'Clear All Markers',act:()=>TL.clearMarkers()}
+          {t:'Delete Marker',act:()=>EditOps.deleteMarker(m)},
+          {t:'Clear All Markers',act:()=>EditOps.clearMarkers()}
         ],e.clientX,e.clientY);
       });
       ru.appendChild(el);
@@ -3330,9 +3372,12 @@ const TL={
   deleteSel(){
     const s=Store.seq;if(!s||!S.selClips.size)return;
     const items=[];
-    s.tracks.forEach(t=>t.clips.forEach(c=>{
-      if(S.selClips.has(c.id))items.push({clip:c,trackId:t.id});
-    }));
+    s.tracks.forEach(t=>{
+      if(t.locked)return;
+      t.clips.forEach(c=>{
+        if(S.selClips.has(c.id))items.push({clip:c,trackId:t.id});
+      });
+    });
     if(!items.length)return;
     cmdDeleteClips(items);
     action('Deleted '+items.length+' clip'+(items.length>1?'s':''));
@@ -3498,6 +3543,985 @@ const TL={
     });
   }
 };
+</script>
+<script>
+"use strict";
+/* =====================================================================
+   SynapticCut - 12b EDIT (M2): undoable timeline editing.
+   Move / trim (ripple) / razor / ripple delete / insert / overwrite /
+   copy-paste / duplicate / marquee + multi-select / snapping guides /
+   markers / undoable track operations.
+   ===================================================================== */
+const EditOps={
+  session:null,          /* live drag session (Escape cancels) */
+  clipboard:null,
+
+  /* ============ snapshot machinery (compound ops -> one undo step) ============ */
+  deep(o){return JSON.parse(JSON.stringify(o));},
+  snapClips(){
+    const s=Store.seq;if(!s)return null;
+    return s.tracks.map(t=>({id:t.id,clips:this.deep(t.clips)}));
+  },
+  applyClips(st){
+    const s=Store.seq;if(!s||!st)return;
+    st.forEach(ts=>{
+      const t=Model.trackFor(s,ts.id);
+      if(t)t.clips=this.deep(ts.clips);
+    });
+    Engine.Audio.reattachAll();
+    Bus.emit('clips');
+  },
+  runClips(label,before,after){
+    Cmd.run({label,
+      do(){EditOps.applyClips(after);},
+      undo(){EditOps.applyClips(before);}});
+  },
+  snapTracks(){
+    const s=Store.seq;if(!s)return null;
+    return this.deep(s.tracks);
+  },
+  applyTracks(st){
+    const s=Store.seq;if(!s||!st)return;
+    s.tracks=this.deep(st);
+    Engine.Audio.rebuildBuses();
+    Engine.Audio.setTrackGains();
+    Engine.Audio.reattachAll();
+    Bus.emit('sequence');
+  },
+  runTracks(label,before,after){
+    Cmd.run({label,
+      do(){EditOps.applyTracks(after);},
+      undo(){EditOps.applyTracks(before);}});
+  },
+
+  /* ============ geometry ============ */
+  timeAt(clientX){
+    const sc=$('#tl-scroll');if(!sc)return 0;
+    const r=sc.getBoundingClientRect();
+    return Math.max(0,(clientX-r.left+sc.scrollLeft)/TL.pps);
+  },
+  trackLane(clientY){
+    let near=null,bd=1e9;
+    const els=$$('#tl-tracks .track');
+    for(const el of els){
+      const r=el.getBoundingClientRect();
+      if(clientY>=r.top&&clientY<=r.bottom)return el;
+      const d=clientY<r.top?r.top-clientY:clientY-r.bottom;
+      if(d<bd){bd=d;near=el;}
+    }
+    return near;
+  },
+  laneTop(trackId){
+    const el=$('#tl-tracks .track[data-track="'+trackId+'"]');
+    return el?el.getBoundingClientRect().top:null;
+  },
+
+  /* ============ snapping ============ */
+  snapInfo(t,ignoreId){
+    const s=Store.seq;if(!s)return null;
+    const fps=Store.fps();
+    const thr=Math.max(8/TL.pps,1/(fps*2));
+    let best=null,bd=thr;
+    const con=cand=>{
+      if(cand==null)return;
+      const d=Math.abs(cand-t);
+      if(d<bd){bd=d;best=cand;}
+    };
+    con(Playback.t);
+    con(s.inPoint);con(s.outPoint);
+    s.markers.forEach(m=>con(m.t));
+    s.tracks.forEach(tr=>tr.clips.forEach(c=>{
+      if(c.id===ignoreId)return;
+      con(c.start);con(Model.clipEnd(c));
+    }));
+    return best==null?null:{t:best};
+  },
+  maybeSnap(t,ignoreId){
+    if(!S.snap)return Model.frameSnap(t,Store.fps());
+    const hit=this.snapInfo(t,ignoreId);
+    return hit?hit.t:Model.frameSnap(t,Store.fps());
+  },
+
+  /* ============ drag overlays ============ */
+  _snapEl:null,_tipEl:null,
+  guide(t){
+    if(!this._snapEl){
+      this._snapEl=document.createElement('div');
+      this._snapEl.id='tl-snapline';
+      const c=$('#tl-content');if(c)c.appendChild(this._snapEl);
+    }
+    if(t==null){this._snapEl.style.display='none';return;}
+    this._snapEl.style.display='block';
+    this._snapEl.style.left=(t*TL.pps)+'px';
+  },
+  tip(x,y,html){
+    if(!this._tipEl){
+      this._tipEl=document.createElement('div');
+      this._tipEl.id='edit-tip';
+      (document.body||document.documentElement).appendChild(this._tipEl);
+    }
+    if(x==null){this._tipEl.style.display='none';return;}
+    this._tipEl.style.display='block';
+    this._tipEl.textContent=html;
+    this._tipEl.style.left=Math.min(x+16,innerWidth-180)+'px';
+    this._tipEl.style.top=Math.max(8,y-34)+'px';
+  },
+  fmtDelta(d){
+    const fps=Store.fps();
+    const f=Math.round(Math.abs(d)*fps);
+    return (d>=0?'+':'-')+Math.abs(d).toFixed(2)+'s ('+f+'f)';
+  },
+
+  /* ============ collision resolvers (mutate a track state) ============ */
+  /* insert: splice semantics - split any clip straddling s, push the tail right by dur */
+  insertRegion(ts,s,dur,keep){
+    const others=ts.clips.filter(c=>!keep.has(c.id));
+    const out=[];
+    for(const o of others){
+      if(Model.clipEnd(o)<=s+1e-9){out.push(o);continue;}          /* fully before */
+      if(o.start>=s-1e-9){o.start+=dur;out.push(o);continue;}      /* at/after: push */
+      const L=EditOps.deep(o);L.duration=s-o.start;out.push(L);    /* straddles: split */
+      const R=EditOps.deep(o);R.id=ID.next('clip');
+      R.inPoint=o.inPoint+(s-o.start);R.duration=Model.clipEnd(o)-s;R.start=s+dur;
+      out.push(R);
+    }
+    ts.clips=out;
+  },
+  /* overwrite: cut the [s,e] range out of every non-kept clip */
+  overwriteRegion(ts,s,e,keep){
+    const out=[];
+    for(const o of ts.clips){
+      if(keep.has(o.id)){out.push(o);continue;}
+      if(Model.clipEnd(o)<=s+1e-9||o.start>=e-1e-9){out.push(o);continue;}
+      if(o.start<s-1e-9&&Model.clipEnd(o)>e+1e-9){                 /* fully covered: split in two */
+        const L=EditOps.deep(o);L.duration=s-o.start;
+        const R=EditOps.deep(o);R.id=ID.next('clip');
+        R.start=e;R.inPoint=o.inPoint+(e-o.start);R.duration=Model.clipEnd(o)-e;
+        out.push(L,R);
+      }else if(o.start<s-1e-9){                                    /* trim right edge */
+        const x=EditOps.deep(o);x.duration=s-o.start;out.push(x);
+      }else{                                                       /* trim left edge */
+        const x=EditOps.deep(o);
+        const cut=e-o.start;
+        x.inPoint+=cut;x.start=e;x.duration-=cut;
+        out.push(x);
+      }
+    }
+    ts.clips=out;
+  },
+
+  /* ============ edit operations ============ */
+  moveClips(items,mode){
+    const s=Store.seq;if(!s||!items.length)return;
+    const before=this.snapClips();if(!before)return;
+    const W=this.deep(before);
+    const state=id=>W.find(x=>x.id===id);
+    const keep=new Set(items.map(i=>i.clip.id));
+    items.forEach(i=>{
+      const ts=state(i.fromTrackId);
+      if(ts)ts.clips=ts.clips.filter(c=>c.id!==i.clip.id);
+    });
+    const sorted=[...items].sort((a,b)=>a.newStart-b.newStart);
+    for(const it of sorted){
+      const ts=state(it.toTrackId);if(!ts)continue;
+      if(mode==='insert')this.insertRegion(ts,it.newStart,it.clip.duration,keep);
+      else this.overwriteRegion(ts,it.newStart,it.newStart+it.clip.duration,keep);
+      ts.clips.push(Object.assign(this.deep(it.clip),{trackId:it.toTrackId,start:it.newStart}));
+    }
+    this.runClips(items.length>1?'Move Clips ('+items.length+')':'Move Clip',before,W);
+  },
+
+  trimBounds(clips,wc,edge){
+    const fps=Store.fps(),minDur=1/fps;
+    const a=Model.asset(wc.assetId);
+    const end0=wc.start+wc.duration;
+    if(edge==='l'){
+      let lo=0;
+      if(!(a&&(a.kind==='image'||a.kind==='matte'||a.kind==='bars')))lo=wc.start-wc.inPoint;
+      let prev=0;
+      clips.forEach(x=>{
+        if(x.id===wc.id)return;
+        const e=Model.clipEnd(x);
+        if(e<=wc.start+1e-9)prev=Math.max(prev,e);
+      });
+      lo=Math.max(0,lo,prev);
+      let hi=end0-minDur;
+      if(hi<lo)hi=lo;
+      return [lo,hi];
+    }
+    let hi=end0+this.supplyRight(a,wc);
+    let next=Infinity;
+    clips.forEach(x=>{
+      if(x.id===wc.id)return;
+      if(x.start>=end0-1e-9)next=Math.min(next,x.start);
+    });
+    if(isFinite(next))hi=Math.min(hi,next);
+    let lo=wc.start+minDur;
+    if(hi<lo)hi=lo;
+    return [lo,hi];
+  },
+  supplyRight(a,wc){
+    if(!a)return 1e9;
+    if(a.kind==='image'||a.kind==='matte'||a.kind==='bars')return 1e9;
+    const d=a.duration;
+    return (d==null||!isFinite(d))?1e9:Math.max(0,d-(wc.inPoint+wc.duration));
+  },
+  _applyTrim(ts,wc,edge,t,ripple){
+    const fps=Store.fps();
+    const b=EditOps.trimBounds(ts.clips,wc,edge);
+    const nt=clamp(Model.frameSnap(t,fps),b[0],b[1]);
+    const end0=wc.start+wc.duration;
+    if(edge==='l'){
+      const dL=nt-wc.start;
+      if(Math.abs(dL)<1e-9)return false;
+      wc.inPoint=Math.max(0,wc.inPoint+dL);
+      wc.start=nt;wc.duration-=dL;
+      if(ripple)ts.clips.forEach(x=>{
+        if(x.id!==wc.id&&x.start>=end0-1e-9)x.start+=dL;
+      });
+    }else{
+      const dD=nt-end0;
+      if(Math.abs(dD)<1e-9)return false;
+      wc.duration+=dD;
+      if(ripple)ts.clips.forEach(x=>{
+        if(x.id!==wc.id&&x.start>=end0-1e-9)x.start+=dD;
+      });
+    }
+    return true;
+  },
+  trim(item,edge,t,ripple){
+    const s=Store.seq;if(!s)return false;
+    const before=this.snapClips();if(!before)return false;
+    const W=this.deep(before);
+    const ts=W.find(x=>x.id===item.track.id);if(!ts)return false;
+    const wc=ts.clips.find(x=>x.id===item.clip.id);if(!wc)return false;
+    if(!this._applyTrim(ts,wc,edge,t,ripple))return false;
+    this.runClips((ripple?'Ripple Trim ':'Trim ')+(edge==='l'?'In':'Out'),before,W);
+    return true;
+  },
+  rippleTrimPlayhead(side){
+    const s=Store.seq;if(!s)return;
+    const t=Playback.t;
+    let items=[];
+    if(S.selClips.size){
+      items=[...S.selClips].map(id=>Model.clip(s,id)).filter(Boolean)
+        .filter(it=>!it.track.locked);
+    }else{
+      s.tracks.forEach(tr=>{
+        if(tr.locked)return;
+        let c;
+        if(side==='l'){
+          c=tr.clips.find(x=>t>x.start+1e-9&&t<Model.clipEnd(x)-1e-9)||
+            tr.clips.filter(x=>x.start>=t-1e-9).sort((a,b)=>a.start-b.start)[0];
+        }else{
+          c=tr.clips.find(x=>t>x.start+1e-9&&t<Model.clipEnd(x)-1e-9)||
+            tr.clips.filter(x=>Model.clipEnd(x)<=t+1e-9).sort((a,b)=>Model.clipEnd(b)-Model.clipEnd(a))[0];
+        }
+        if(c)items.push({clip:c,track:tr});
+      });
+    }
+    if(!items.length){action('No clip to trim at playhead');return;}
+    const before=this.snapClips();if(!before)return;
+    const W=this.deep(before);
+    let n=0;
+    items.forEach(it=>{
+      const ts=W.find(x=>x.id===it.track.id);if(!ts)return;
+      const wc=ts.clips.find(x=>x.id===it.clip.id);if(!wc)return;
+      if(EditOps._applyTrim(ts,wc,side,t,true))n++;
+    });
+    if(!n){action('Nothing to trim');return;}
+    this.runClips('Ripple Trim '+(side==='l'?'In':'Out')+' to Playhead',before,W);
+    action('Ripple-trimmed '+n+' clip'+(n>1?'s':'')+' to playhead');
+  },
+
+  razor(item,t){
+    const s=Store.seq;if(!s)return false;
+    const fps=Store.fps();
+    t=Model.frameSnap(t,fps);
+    const c=item.clip;
+    if(t<=c.start+1/(fps*2)||t>=Model.clipEnd(c)-1/(fps*2))return false;
+    const before=this.snapClips();if(!before)return false;
+    const W=this.deep(before);
+    const ts=W.find(x=>x.id===item.track.id);if(!ts)return false;
+    const i=ts.clips.findIndex(x=>x.id===c.id);if(i<0)return false;
+    const L=this.deep(c),R=this.deep(c);
+    L.duration=t-c.start;
+    R.id=ID.next('clip');R.start=t;R.inPoint=c.inPoint+(t-c.start);R.duration=Model.clipEnd(c)-t;
+    ts.clips.splice(i,1,L,R);
+    this.runClips('Razor',before,W);
+    action('Split '+c.name+' at '+fmtTC(t,fps));
+    return true;
+  },
+  razorAtPlayhead(){
+    const s=Store.seq;if(!s)return;
+    const t=Playback.t;
+    let items=[];
+    if(S.selClips.size){
+      items=[...S.selClips].map(id=>Model.clip(s,id)).filter(Boolean)
+        .filter(it=>t>it.clip.start+1e-9&&t<Model.clipEnd(it.clip)-1e-9);
+    }else{
+      s.tracks.forEach(tr=>{
+        if(tr.locked)return;
+        tr.clips.forEach(c=>{
+          if(t>c.start+1e-9&&t<Model.clipEnd(c)-1e-9)items.push({clip:c,track:tr});
+        });
+      });
+    }
+    if(!items.length){action('Nothing to split at playhead');return;}
+    const before=this.snapClips();if(!before)return;
+    const W=this.deep(before);
+    let n=0;
+    items.forEach(it=>{
+      const ts=W.find(x=>x.id===it.track.id);if(!ts)return;
+      const i=ts.clips.findIndex(x=>x.id===it.clip.id);if(i<0)return;
+      const c=it.clip;
+      const L=EditOps.deep(c),R=EditOps.deep(c);
+      L.duration=t-c.start;
+      R.id=ID.next('clip');R.start=t;R.inPoint=c.inPoint+(t-c.start);R.duration=Model.clipEnd(c)-t;
+      ts.clips.splice(i,1,L,R);n++;
+    });
+    if(!n)return;
+    this.runClips('Razor at Playhead ('+n+')',before,W);
+    action('Split '+n+' clip'+(n>1?'s':'')+' at playhead');
+  },
+
+  rippleDelete(items){
+    const s=Store.seq;if(!s)return;
+    if(!items){
+      if(!S.selClips.size){action('No clips selected');return;}
+      items=[...S.selClips].map(id=>Model.clip(s,id)).filter(Boolean)
+        .filter(it=>!it.track.locked);
+    }
+    if(!items.length)return;
+    items=[...items].sort((a,b)=>a.clip.start-b.clip.start);
+    const before=this.snapClips();if(!before)return;
+    const W=this.deep(before);
+    let n=0;
+    items.forEach(it=>{
+      const ts=W.find(x=>x.id===it.track.id);if(!ts)return;
+      const wc=ts.clips.find(x=>x.id===it.clip.id);if(!wc)return;
+      const dur=wc.duration,end0=wc.start+wc.duration;
+      ts.clips=ts.clips.filter(x=>x.id!==wc.id);
+      ts.clips.forEach(x=>{if(x.start>=end0-1e-9)x.start-=dur;});
+      n++;
+      S.selClips.delete(wc.id);
+    });
+    if(!n)return;
+    this.runClips('Ripple Delete'+(n>1?' ('+n+')':''),before,W);
+    Bus.emit('sel');
+    action('Ripple-deleted '+n+' clip'+(n>1?'s':''));
+  },
+
+  copy(lift){
+    const s=Store.seq;
+    if(!s||!S.selClips.size)return;
+    const items=[];
+    s.tracks.forEach(t=>t.clips.forEach(c=>{
+      if(S.selClips.has(c.id))items.push({data:this.deep(c),trackId:t.id});
+    }));
+    if(!items.length)return;
+    let start=Infinity,end=-Infinity;
+    items.forEach(i=>{
+      start=Math.min(start,i.data.start);
+      end=Math.max(end,i.data.start+i.data.duration);
+    });
+    this.clipboard={items,span:{start,end}};
+    action((lift?'Cut ':'Copied ')+items.length+' clip'+(items.length>1?'s':''));
+    if(lift)TL.deleteSel();
+  },
+  paste(at,modeOverride){
+    if(!this.clipboard||!Store.seq)return;
+    const s=Store.seq;
+    const t0=at!=null?at:Playback.t;
+    const items=this.clipboard.items,span=this.clipboard.span;
+    const before=this.snapClips();if(!before)return;
+    const W=this.deep(before);
+    const placed=[],keep=new Set();
+    items.forEach(it=>{
+      let tr=Model.trackFor(s,it.trackId);
+      if(!tr||tr.locked){
+        const a=Model.asset(it.data.assetId);
+        const kind=a?Model.trackKindFor(a):'video';
+        tr=s.tracks.find(x=>x.kind===kind&&!x.locked)||null;
+        if(!tr)return;
+      }
+      const d=this.deep(it.data);
+      d.id=ID.next('clip');keep.add(d.id);
+      d.trackId=tr.id;
+      d.start=it.data.start+(t0-span.start);
+      if(d.start<-1e-9)return;
+      placed.push({d,trackId:tr.id});
+    });
+    if(!placed.length)return;
+    placed.sort((a,b)=>a.d.start-b.d.start);
+    const mode=modeOverride||S.mode;
+    for(const p of placed){
+      const ts=W.find(x=>x.id===p.trackId);if(!ts)continue;
+      if(mode==='insert')this.insertRegion(ts,p.d.start,p.d.duration,keep);
+      else this.overwriteRegion(ts,p.d.start,p.d.start+p.d.duration,keep);
+      ts.clips.push(p.d);
+    }
+    this.runClips('Paste ('+placed.length+')',before,W);
+    S.selClips.clear();
+    placed.forEach(p=>S.selClips.add(p.d.id));
+    Bus.emit('sel');
+    action('Pasted '+placed.length+' clip'+(placed.length>1?'s':'')+' ('+mode+')');
+  },
+  duplicate(){
+    if(!S.selClips.size)return;
+    this.copy(false);
+    if(!this.clipboard)return;
+    this.paste(this.clipboard.span.end,'insert');
+  },
+
+  placeAsset(a,track,start,dur,mode){
+    const s=Store.seq;
+    if(!s||!track||track.locked)return null;
+    start=Math.max(0,Model.frameSnap(start,Store.fps()));
+    const before=this.snapClips();if(!before)return null;
+    const W=this.deep(before);
+    const ts=W.find(x=>x.id===track.id);if(!ts)return null;
+    const clip=Model.newClip(Store.p,a,track,start,0,dur);
+    if(mode==='insert')this.insertRegion(ts,start,clip.duration,new Set([clip.id]));
+    else this.overwriteRegion(ts,start,start+clip.duration,new Set([clip.id]));
+    ts.clips.push(this.deep(clip));
+    this.runClips((mode==='insert'?'Insert ':'Overwrite ')+a.name,before,W);
+    S.selClips.clear();
+    S.selClips.add(clip.id);
+    Bus.emit('sel');
+    return clip;
+  },
+  fromSource(mode){
+    const a=Model.asset(Source.assetId);
+    if(!a){action('No source clip loaded');return;}
+    if(a.offline){action('Source media is offline');return;}
+    const s=Store.seq;if(!s)return;
+    const kind=Model.trackKindFor(a);
+    const tr=s.tracks.find(t=>t.kind===kind&&!t.locked);
+    if(!tr){action('No unlocked '+kind+' track');return;}
+    const dur=a.kind==='image'?Store.p.settings.stillDuration:(a.duration||5);
+    const clip=this.placeAsset(a,tr,Playback.t,dur,mode);
+    if(clip)action((mode==='insert'?'Inserted ':'Overwrote ')+a.name+' at playhead');
+  },
+
+  /* ============ track operations (undoable, sequence-level) ============ */
+  addTrack(kind){
+    const s=Store.seq;if(!s)return;
+    const before=this.snapTracks();if(!before)return;
+    const after=this.deep(before);
+    const used=new Set(after.map(t=>t.id));
+    let n=1;while(used.has((kind==='video'?'V':'A')+n))n++;
+    const id=(kind==='video'?'V':'A')+n;
+    const tr=kind==='video'
+      ?{id,kind:'video',name:'Video '+n,visible:true,locked:false,height:30,gainDb:0,mute:false,solo:false,clips:[]}
+      :{id,kind:'audio',name:'Audio '+n,visible:true,locked:false,height:46,gainDb:0,mute:false,solo:false,clips:[]};
+    let at=after.length;
+    if(kind==='video'){
+      const ai=after.findIndex(t=>t.kind==='audio');
+      if(ai>=0)at=ai;
+    }
+    after.splice(at,0,tr);
+    this.runTracks('Add Track '+id,before,after);
+    action('Added track '+id);
+  },
+  deleteTrack(trackId){
+    const s=Store.seq;if(!s)return;
+    const tr=Model.trackFor(s,trackId);if(!tr)return;
+    if(tr.clips.length){action('Track '+trackId+' is not empty');return;}
+    const before=this.snapTracks();if(!before)return;
+    this.runTracks('Delete Track '+trackId,before,before.filter(t=>t.id!==trackId));
+    action('Deleted track '+trackId);
+  },
+  deleteEmptyTracks(){
+    const s=Store.seq;if(!s)return;
+    const empty=s.tracks.filter(t=>!t.clips.length);
+    if(!empty.length){action('No empty tracks');return;}
+    const before=this.snapTracks();if(!before)return;
+    this.runTracks('Delete Empty Tracks ('+empty.length+')',before,before.filter(t=>t.clips.length>0));
+    action('Deleted '+empty.length+' empty track'+(empty.length>1?'s':''));
+  },
+
+  /* ============ markers (undoable) ============ */
+  _runMarkers(after,label){
+    const s=Store.seq;if(!s)return;
+    const before=this.deep(s.markers);
+    Cmd.run({label,
+      do(){s.markers=EditOps.deep(after);Store.setDirty(true);TL.render();},
+      undo(){s.markers=EditOps.deep(before);Store.setDirty(true);TL.render();}
+    });
+  },
+  addMarker(){
+    const s=Store.seq;if(!s)return;
+    const t=Model.frameSnap(Playback.t,Store.fps());
+    const after=s.markers.map(m=>EditOps.deep(m)).concat([{t,name:'Marker '+(s.markers.length+1)}]);
+    this._runMarkers(after,'Add Marker');
+    action('Marker added at '+fmtTC(t,Store.fps()));
+  },
+  deleteMarker(m){
+    const s=Store.seq;if(!s)return;
+    this._runMarkers(s.markers.filter(x=>x!==m),'Delete Marker');
+  },
+  clearMarkers(){
+    const s=Store.seq;if(!s||!s.markers.length)return;
+    this._runMarkers([],'Clear Markers');
+    action('Markers cleared');
+  },
+  moveMarker(m,t){
+    const s=Store.seq;if(!s)return;
+    t=Math.max(0,Model.frameSnap(t,Store.fps()));
+    if(Math.abs(t-m.t)<1e-9)return;
+    const after=s.markers.map(x=>x===m?Object.assign(EditOps.deep(x),{t}):EditOps.deep(x));
+    this._runMarkers(after,'Move Marker');
+  },
+  nextMarker(){
+    const s=Store.seq;if(!s||!s.markers.length)return;
+    const t=Playback.t;
+    const times=s.markers.map(m=>m.t).sort((a,b)=>a-b);
+    let dest=times.find(x=>x>t+1/(Store.fps()*2));
+    if(dest==null)dest=times[0];
+    Playback.seek(dest);
+    action('Marker '+fmtTC(dest,Store.fps()));
+  },
+
+  /* ============ pointer interactions ============ */
+  onTrackDown(e){
+    if(e.button!==0)return;
+    const s=Store.seq;if(!s||S.dragging)return;
+    const clipEl=e.target.closest&&e.target.closest('.clip');
+    if(clipEl){
+      const item=Model.clip(s,clipEl.dataset.clip);
+      if(!item)return;
+      if(item.track.locked)return;          /* per-clip handler already flags it */
+      const tool=S.tool;
+      if(tool==='razor'){
+        e.stopPropagation();                /* suppress selection change */
+        this.razor(item,this.timeAt(e.clientX));
+        return;
+      }
+      if(tool==='track'){this._trackSelect(e,item);return;}
+      if(tool==='hand'){this._handPan(e);return;}
+      if(tool==='slip'){action('Slip tool arrives with keyframes (M4)');return;}
+      if(tool!=='select'&&tool!=='ripple')return;
+      const r=clipEl.getBoundingClientRect();
+      const ez=r.width<18?4:7;
+      if(e.clientX<=r.left+ez)this.trimDrag(e,item,'l');
+      else if(e.clientX>=r.right-ez)this.trimDrag(e,item,'r');
+      else this.moveDrag(e,item);
+    }else if(e.target.closest&&e.target.closest('.track')){
+      if(S.tool==='hand'){this._handPan(e);return;}
+      if(S.tool!=='select')return;
+      this.marquee(e);
+    }
+  },
+  _trackSelect(e,item){
+    if(!e.shiftKey)S.selClips.clear();
+    item.track.clips.forEach(c=>{
+      if(c.start>=item.clip.start-1e-9)S.selClips.add(c.id);
+    });
+    Bus.emit('sel');
+    action('Track-select: '+S.selClips.size+' clip'+(S.selClips.size===1?'':'s'));
+  },
+
+  moveDrag(e,item){
+    const s=Store.seq;if(!s)return;
+    if(item.track.locked||!S.selClips.has(item.clip.id))return;
+    const fps=Store.fps();
+    const grab=item.clip,grabStart=grab.start;
+    const sel=[...S.selClips].map(id=>Model.clip(s,id)).filter(Boolean)
+      .filter(it=>!it.track.locked);
+    if(!sel.some(it=>it.clip.id===grab.id))return;
+    const orig=new Map(sel.map(it=>[it.clip.id,{clip:it.clip,trackId:it.track.id,start:it.clip.start}]));
+    const kindList=t=>s.tracks.filter(x=>x.kind===t.kind);
+    const primaryKind=kindList(item.track);
+    const pSrcIdx=primaryKind.findIndex(x=>x.id===item.track.id);
+    const x0=e.clientX,y0=e.clientY;
+    let active=false,dx=0,dTrack=0,els=null;
+    S.dragging={kind:'edit'};
+    let minStart=Infinity;
+    orig.forEach(o=>{minStart=Math.min(minStart,o.start);});
+    const cleanup=()=>{
+      document.removeEventListener('pointermove',mv);
+      document.removeEventListener('pointerup',up);
+      if(els)els.forEach(el=>{el.classList.remove('moving');el.style.transform='';});
+      EditOps.guide(null);EditOps.tip(null);
+      S.dragging=null;EditOps.session=null;
+    };
+    const mv=ev=>{
+      if(!active){
+        if(Math.hypot(ev.clientX-x0,ev.clientY-y0)<5)return;
+        active=true;
+        els=[...orig.keys()].map(id=>$('#tl-tracks .clip[data-clip="'+id+'"]')).filter(Boolean);
+        els.forEach(el=>el.classList.add('moving'));
+      }
+      const raw=grabStart+(ev.clientX-x0)/TL.pps;
+      const hit=S.snap?EditOps.snapInfo(raw,grab.id):null;
+      const ns=hit?hit.t:Model.frameSnap(raw,fps);
+      EditOps.guide(hit?hit.t:null);
+      dx=Math.max(ns-grabStart,-minStart);
+      const lane=EditOps.trackLane(ev.clientY);
+      if(lane){
+        const lt=Model.trackFor(s,lane.dataset.track);
+        if(lt&&lt.kind===item.track.kind){
+          dTrack=kindList(lt).findIndex(x=>x.id===lt.id)-pSrcIdx;
+        }else{
+          let bi=null,bd=1e9;
+          primaryKind.forEach((x,i)=>{
+            const el=$('#tl-tracks .track[data-track="'+x.id+'"]');if(!el)return;
+            const r=el.getBoundingClientRect();
+            const d=ev.clientY<r.top?r.top-ev.clientY:ev.clientY-r.bottom;
+            if(d<bd){bd=d;bi=i;}
+          });
+          if(bi!=null)dTrack=bi-pSrcIdx;
+        }
+      }
+      els.forEach(el=>{
+        const o=orig.get(el.dataset.clip);if(!o)return;
+        el.style.left=((o.start+dx)*TL.pps)+'px';
+        const tr=Model.trackFor(s,o.trackId);
+        const kl=kindList(tr);
+        const si=kl.findIndex(x=>x.id===o.trackId);
+        const ni=clamp(si+dTrack,0,kl.length-1);
+        const dTop=EditOps.laneTop(kl[ni].id);
+        const sTop=EditOps.laneTop(o.trackId);
+        if(dTop!=null&&sTop!=null)el.style.transform='translateY('+(dTop-sTop)+'px)';
+      });
+      EditOps.tip(ev.clientX,ev.clientY,
+        'Move '+EditOps.fmtDelta(dx)+' -> '+fmtTC(Math.max(0,grabStart+dx),fps));
+    };
+    const up=ev=>{
+      const wasActive=active;
+      cleanup();
+      if(!wasActive)return;
+      if(Math.abs(dx)<1e-9&&dTrack===0){TL.render();return;}
+      const items=[];
+      let locked=false;
+      orig.forEach((o,id)=>{
+        const srcTr=Model.trackFor(s,o.trackId);
+        const kl=kindList(srcTr);
+        const si=kl.findIndex(x=>x.id===o.trackId);
+        const ni=clamp(si+dTrack,0,kl.length-1);
+        const nTr=kl[ni];
+        if(nTr.locked)locked=true;
+        items.push({clip:o.clip,fromTrackId:o.trackId,toTrackId:nTr.id,newStart:Math.max(0,o.start+dx)});
+      });
+      if(locked){action('Target track is locked');TL.render();return;}
+      const mode=(ev.ctrlKey||ev.metaKey)?(S.mode==='insert'?'overwrite':'insert'):S.mode;
+      EditOps.moveClips(items,mode);
+      action('Moved '+items.length+' clip'+(items.length>1?'s':'')+' ('+mode+')');
+    };
+    document.addEventListener('pointermove',mv);
+    document.addEventListener('pointerup',up);
+    this.session={cancel(){cleanup();TL.render();action('Move cancelled');}};
+  },
+
+  trimDrag(e,item,edge){
+    const s=Store.seq;if(!s)return;
+    const c=item.clip,tr=item.track;
+    if(tr.locked)return;
+    const fps=Store.fps();
+    const ripple=S.tool==='ripple'||e.shiftKey;
+    const x0=e.clientX;
+    const end0=Model.clipEnd(c);
+    const el=$('#tl-tracks .clip[data-clip="'+c.id+'"]');
+    const b=this.trimBounds(tr.clips,c,edge);
+    let active=false,lastT=null;
+    S.dragging={kind:'edit'};
+    const cleanup=()=>{
+      document.removeEventListener('pointermove',mv);
+      document.removeEventListener('pointerup',up);
+      if(el)el.classList.remove('moving');
+      EditOps.guide(null);EditOps.tip(null);
+      S.dragging=null;EditOps.session=null;
+    };
+    const mv=ev=>{
+      if(!active){
+        active=true;
+        if(el)el.classList.add('moving');
+      }
+      const raw=(edge==='l'?c.start:end0)+(ev.clientX-x0)/TL.pps;
+      const hit=S.snap?EditOps.snapInfo(raw,c.id):null;
+      let t=hit?hit.t:Model.frameSnap(raw,fps);
+      t=clamp(t,b[0],b[1]);
+      EditOps.guide(hit?hit.t:null);
+      lastT=t;
+      if(edge==='l'){
+        const dL=t-c.start;
+        if(el){
+          el.style.left=(t*TL.pps)+'px';
+          el.style.width=Math.max(8,(c.duration-dL)*TL.pps-1)+'px';
+        }
+        EditOps.tip(ev.clientX,ev.clientY,
+          'Trim in '+EditOps.fmtDelta(dL)+' - dur '+fmtTC(c.duration-dL,fps)+(ripple?' - ripple':''));
+      }else{
+        const dD=t-end0;
+        if(el)el.style.width=Math.max(8,(c.duration+dD)*TL.pps-1)+'px';
+        EditOps.tip(ev.clientX,ev.clientY,
+          'Trim out '+EditOps.fmtDelta(dD)+' - dur '+fmtTC(c.duration+dD,fps)+(ripple?' - ripple':''));
+      }
+    };
+    const up=()=>{
+      const wasActive=active,t=lastT;
+      cleanup();
+      if(!wasActive||t==null){TL.render();return;}
+      EditOps.trim(item,edge,t,ripple);
+    };
+    document.addEventListener('pointermove',mv);
+    document.addEventListener('pointerup',up);
+    this.session={cancel(){cleanup();TL.render();action('Trim cancelled');}};
+  },
+
+  marquee(e){
+    const wrap=$('#tl-tracks');if(!wrap)return;
+    const box=document.createElement('div');
+    box.id='tl-marquee';
+    wrap.appendChild(box);
+    const r0=wrap.getBoundingClientRect();
+    const x0=e.clientX,y0=e.clientY;
+    const base=e.shiftKey?new Set(S.selClips):new Set();
+    S.dragging={kind:'marquee'};
+    const cleanup=()=>{
+      document.removeEventListener('pointermove',mv);
+      document.removeEventListener('pointerup',up);
+      box.remove();
+      EditOps.tip(null);
+      S.dragging=null;EditOps.session=null;
+    };
+    const mv=ev=>{
+      const L=Math.min(x0,ev.clientX)-r0.left,T=Math.min(y0,ev.clientY)-r0.top;
+      const R=Math.max(x0,ev.clientX)-r0.left,B=Math.max(y0,ev.clientY)-r0.top;
+      box.style.display='block';
+      box.style.left=L+'px';box.style.top=T+'px';
+      box.style.width=(R-L)+'px';box.style.height=(B-T)+'px';
+      S.selClips.clear();
+      base.forEach(id=>S.selClips.add(id));
+      $$('#tl-tracks .track').forEach(lane=>{
+        const lr=lane.getBoundingClientRect();
+        if(lr.bottom<r0.top+T||lr.top>r0.top+B)return;
+        lane.querySelectorAll('.clip').forEach(el=>{
+          const cr=el.getBoundingClientRect();
+          if(cr.right<r0.left+L||cr.left>r0.left+R)return;
+          const it=Store.seq?Model.clip(Store.seq,el.dataset.clip):null;
+          if(it&&!it.track.locked)S.selClips.add(el.dataset.clip);
+        });
+      });
+      TL.syncSel();
+      Panels.selStatus();
+      EditOps.tip(ev.clientX,ev.clientY,S.selClips.size+' selected');
+    };
+    const up=()=>{
+      cleanup();
+      Bus.emit('sel');
+    };
+    document.addEventListener('pointermove',mv);
+    document.addEventListener('pointerup',up);
+    this.session={cancel(){cleanup();Bus.emit('sel');}};
+  },
+
+  _handPan(e){
+    const sc=$('#tl-scroll');if(!sc)return;
+    const x0=e.clientX,y0=e.clientY,sx=sc.scrollLeft,sy=sc.scrollTop;
+    S.dragging={kind:'pan'};
+    const cleanup=()=>{
+      document.removeEventListener('pointermove',mv);
+      document.removeEventListener('pointerup',up);
+      S.dragging=null;EditOps.session=null;
+    };
+    const mv=ev=>{
+      sc.scrollLeft=sx-(ev.clientX-x0);
+      sc.scrollTop=sy-(ev.clientY-y0);
+    };
+    const up=cleanup;
+    document.addEventListener('pointermove',mv);
+    document.addEventListener('pointerup',up);
+    this.session={cancel:cleanup};
+  },
+
+  _bindMarkerDrag(){
+    const ru=$('#tl-ruler');if(!ru)return;
+    ru.addEventListener('pointerdown',e=>{
+      const mk=e.target.closest&&e.target.closest('.tmark');
+      if(!mk||e.button!==0)return;
+      e.preventDefault();e.stopPropagation();   /* beat the scrub handler */
+      const s=Store.seq;if(!s)return;
+      const m=s.markers[[...ru.querySelectorAll('.tmark')].indexOf(mk)];
+      if(!m)return;
+      const mv=ev=>{
+        const t=EditOps.timeAt(ev.clientX);
+        const hit=S.snap?EditOps.snapInfo(t,null):null;
+        const nt=Math.max(0,hit?hit.t:t);
+        mk.style.left=(nt*TL.pps-3)+'px';
+        EditOps.guide(hit?hit.t:null);
+      };
+      const up=ev=>{
+        document.removeEventListener('pointermove',mv);
+        document.removeEventListener('pointerup',up);
+        EditOps.guide(null);
+        EditOps.moveMarker(m,EditOps.timeAt(ev.clientX));
+      };
+      document.addEventListener('pointermove',mv);
+      document.addEventListener('pointerup',up);
+    },true);
+  },
+
+  _bindModeButtons(){
+    const ins=$('#tl-mode-ins'),ovr=$('#tl-mode-ovr');
+    const sync=()=>{
+      if(ins)ins.classList.toggle('on',S.mode==='insert');
+      if(ovr)ovr.classList.toggle('on',S.mode==='overwrite');
+    };
+    if(ins)ins.addEventListener('click',()=>{
+      S.mode='insert';sync();action('Insert mode: drops push clips right');
+    });
+    if(ovr)ovr.addEventListener('click',()=>{
+      S.mode='overwrite';sync();action('Overwrite mode: drops cut existing clips');
+    });
+    sync();
+  },
+
+  init(){
+    const tracks=$('#tl-tracks');
+    if(tracks)tracks.addEventListener('pointerdown',e=>EditOps.onTrackDown(e),true);
+    this._bindMarkerDrag();
+    this._bindModeButtons();
+    document.addEventListener('keydown',e=>{
+      if(e.key==='Escape'&&EditOps.session){
+        const sn=EditOps.session;
+        EditOps.session=null;
+        sn.cancel();
+      }
+    });
+    (document.body||document.documentElement).dataset.tool=S.tool;
+  }
+};
+
+/* ================= M2 overrides of M1 entry points ================= */
+TL.dropAsset=function(a,tr,clientX){
+  const s=Store.seq;
+  if(!s||!tr||tr.locked)return;
+  let t=EditOps.timeAt(clientX);
+  t=EditOps.maybeSnap(t,null);
+  const dur=a.kind==='image'?Store.p.settings.stillDuration:(a.duration||5);
+  const clip=EditOps.placeAsset(a,tr,t,dur,S.mode);
+  if(clip)action('Added '+a.name+' to '+tr.id+' at '+fmtTC(t,Store.fps())+' ('+S.mode+')');
+};
+TL.addTrack=k=>EditOps.addTrack(k);
+TL.deleteTrack=id=>EditOps.deleteTrack(id);
+TL.deleteEmptyTracks=()=>EditOps.deleteEmptyTracks();
+TL.addMarker=()=>EditOps.addMarker();
+TL.clearMarkers=()=>EditOps.clearMarkers();
+TL.revealSel=()=>{
+  const it=TL.selInfo();
+  if(it)TL.revealClip(it.clip);
+};
+TL.openClipMenu=function(c,tr,x,y){
+  openMenu(null,[
+    {t:'Cut',k:'Ctrl+X',dis:!S.selClips.size,act:()=>EditOps.copy(true)},
+    {t:'Copy',k:'Ctrl+C',dis:!S.selClips.size,act:()=>EditOps.copy(false)},
+    {t:'Duplicate',k:'Ctrl+D',dis:!S.selClips.size,act:()=>EditOps.duplicate()},
+    {sep:1},
+    {t:'Razor at Playhead',k:'Ctrl+K',act:()=>EditOps.razorAtPlayhead()},
+    {t:'Ripple Delete',k:'Shift+Del',act:()=>EditOps.rippleDelete()},
+    {t:'Delete',k:'Del',act:()=>TL.deleteSel()},
+    {sep:1},
+    {t:'Enable',k:'Shift+E',chk:()=>c.enabled,act:()=>TL.toggleEnable()},
+    {sep:1},
+    {t:'Reveal in Project',act:()=>TL.revealClip(c)},
+    {t:'Properties',act:()=>Panels.renderProps()}
+  ],x,y);
+};
+Bin.insertAtPlayhead=function(a,overwrite){
+  const s=Store.seq;if(!s||a.offline)return;
+  const kind=Model.trackKindFor(a);
+  const tr=s.tracks.find(t=>t.kind===kind&&!t.locked);
+  if(!tr){action('No unlocked '+kind+' track');return;}
+  const dur=a.kind==='image'?Store.p.settings.stillDuration:(a.duration||5);
+  const clip=EditOps.placeAsset(a,tr,Playback.t,dur,overwrite?'overwrite':'insert');
+  if(clip)Playback.seek(clip.start);
+};
+MENUS.edit=()=>[
+  {t:'Undo'+(Cmd.undoLabel()?' '+Cmd.undoLabel():''),k:'Ctrl+Z',act:()=>Cmd.undo(),dis:!Cmd.canUndo()},
+  {t:'Redo'+(Cmd.redoLabel()?' '+Cmd.redoLabel():''),k:'Shift+Ctrl+Z',act:()=>Cmd.redo(),dis:!Cmd.canRedo()},
+  {sep:1},
+  {t:'Cut',k:'Ctrl+X',act:()=>EditOps.copy(true),dis:!S.selClips.size},
+  {t:'Copy',k:'Ctrl+C',act:()=>EditOps.copy(false),dis:!S.selClips.size},
+  {t:'Paste',k:'Ctrl+V',act:()=>EditOps.paste(),dis:!EditOps.clipboard},
+  {t:'Duplicate',k:'Ctrl+D',act:()=>EditOps.duplicate(),dis:!S.selClips.size},
+  {sep:1},
+  {t:'Select All',k:'Ctrl+A',act:()=>TL.selectAll()},
+  {t:'Deselect All',k:'Shift+Ctrl+A',act:()=>{TL.clearSel();Bus.emit('sel');}},
+  {sep:1},
+  {t:'Ripple Delete',k:'Shift+Del',act:()=>EditOps.rippleDelete(),dis:!S.selClips.size},
+  {sep:1},
+  {t:'Preferences',dis:true}
+];
+MENUS.clip=()=>{
+  const sel=TL.selInfo();
+  return [
+    {t:'Enable',k:'Shift+E',chk:()=>sel&&sel.clip.enabled,act:()=>TL.toggleEnable(),dis:!sel},
+    {sep:1},
+    {t:'Razor at Playhead',k:'Ctrl+K',act:()=>EditOps.razorAtPlayhead()},
+    {sep:1},
+    {t:'Speed / Duration…',k:'Ctrl+R',dis:true},
+    {t:'Audio Gain…',k:'G',dis:true},
+    {sep:1},
+    {t:'Reveal in Project',act:()=>TL.revealSel(),dis:!sel},
+    {t:'Properties',act:()=>{Panels.renderProps();},dis:!sel}
+  ];
+};
+MENUS.sequence=()=>[
+  {t:'Add Video Track',act:()=>EditOps.addTrack('video')},
+  {t:'Add Audio Track',act:()=>EditOps.addTrack('audio')},
+  {t:'Delete Empty Tracks',act:()=>EditOps.deleteEmptyTracks()},
+  {sep:1},
+  {t:'Razor at Playhead',k:'Ctrl+K',act:()=>EditOps.razorAtPlayhead()},
+  {t:'Clear All Markers',act:()=>EditOps.clearMarkers(),dis:!(Store.seq&&Store.seq.markers.length)},
+  {sep:1},
+  {t:'Sequence Settings…',act:()=>Shell.seqSettingsDialog()}
+];
+Shell.shortcutsDialog=function(){
+  openModal('Keyboard Shortcuts',
+    '<div class="sc-list">'+
+    '<div class="grp">Playback</div>'+
+    '<b>Space</b> Play / Stop &nbsp; <b>J K L</b> Shuttle reverse / stop / forward<br>'+
+    '<b>Left Right</b> Step one frame &nbsp; <b>Shift+arrows</b> Step 10 frames<br>'+
+    '<b>Home End</b> Start / end of sequence<br>'+
+    '<div class="grp">Tools</div>'+
+    '<b>V</b> Select &nbsp; <b>C</b> Razor &nbsp; <b>A</b> Track select &nbsp; <b>B</b> Ripple trim<br>'+
+    '<b>Y</b> Slip (M4) &nbsp; <b>P</b> Pen (M6) &nbsp; <b>H</b> Hand &nbsp; <b>T</b> Type (M4) &nbsp; <b>Z</b> Zoom<br>'+
+    '<div class="grp">Trim + Split</div>'+
+    '<b>drag clip edge</b> Trim in / out &nbsp; <b>Shift+drag edge</b> Ripple trim<br>'+
+    '<b>Q W</b> Ripple-trim to playhead (in / out)<br>'+
+    '<b>Ctrl+K</b> Razor at playhead<br>'+
+    '<div class="grp">Delete + Clipboard</div>'+
+    '<b>Del</b> Delete (leave gap) &nbsp; <b>Shift+Del</b> Ripple delete<br>'+
+    '<b>Ctrl+X / C / V</b> Cut / Copy / Paste at playhead<br>'+
+    '<b>Ctrl+D</b> Duplicate<br>'+
+    '<div class="grp">Drop modes</div>'+
+    '<b>Insert / Overwrite buttons</b> in the timeline toolbar set the drop mode<br>'+
+    '<b>Ctrl while dropping</b> flips the mode for that drop only<br>'+
+    '<b>, .</b> Insert / Overwrite source clip at playhead<br>'+
+    '<div class="grp">Marks</div>'+
+    '<b>I O</b> Mark in / out &nbsp; <b>M</b> Add marker &nbsp; <b>Shift+M</b> Next marker<br>'+
+    '<div class="grp">Selection</div>'+
+    '<b>Shift+click</b> Add / remove &nbsp; <b>drag empty timeline</b> Marquee select<br>'+
+    '<b>Ctrl+A</b> Select all &nbsp; <b>Shift+Ctrl+A</b> Deselect all<br>'+
+    '<div class="grp">Project</div>'+
+    '<b>Ctrl+S</b> Save project &nbsp; <b>Ctrl+I</b> Import media &nbsp; <b>S</b> Snapping<br>'+
+    '<b>+ - \\</b> Timeline zoom in / out / fit &nbsp; <b>Ctrl+Z</b> Undo &nbsp; <b>Shift+Ctrl+Z</b> Redo<br>'+
+    '</div>',[{t:'OK',pri:true}]);
+};
+(function(){
+  /* XML documents (the SVG artifact) have no <body>: root onto
+     documentElement, which :root selectors match in both contexts */
+  const _setTool=setTool;
+  const ROOT=()=>document.body||document.documentElement;
+  setTool=function(id){
+    _setTool(id);
+    ROOT().dataset.tool=id;
+  };
+  ROOT().dataset.tool=S.tool;
+})();
+EditOps.init();
 </script>
 <script>
 "use strict";
@@ -4201,7 +5225,12 @@ document.addEventListener('keydown',e=>{
       case 'y':e.preventDefault();Cmd.redo();return;
       case 's':e.preventDefault();Shell.saveProject();return;
       case 'i':e.preventDefault();Bin.hasImportInput();return;
-      case 'a':e.preventDefault();TL.selectAll();return;
+      case 'a':e.preventDefault();e.shiftKey?TL.clearSel():TL.selectAll();if(e.shiftKey)Bus.emit('sel');return;
+      case 'c':e.preventDefault();EditOps.copy(false);return;
+      case 'x':e.preventDefault();EditOps.copy(true);return;
+      case 'v':e.preventDefault();EditOps.paste();return;
+      case 'd':e.preventDefault();EditOps.duplicate();return;
+      case 'k':e.preventDefault();EditOps.razorAtPlayhead();return;
       default:return;
     }
   }
@@ -4212,7 +5241,7 @@ document.addEventListener('keydown',e=>{
     case 'Home':Playback.seek(0);return;
     case 'End':Playback.seek(Playback.dur());return;
     case 'Delete':
-    case 'Backspace':e.preventDefault();TL.deleteSel();return;
+    case 'Backspace':e.preventDefault();e.shiftKey?EditOps.rippleDelete():TL.deleteSel();return;
     case 'Escape':closeMenu();closeModal();return;
     case '+':case '=':TL.setZoom(TL.pps*1.35);return;
     case '-':TL.setZoom(TL.pps/1.35);return;
@@ -4224,7 +5253,12 @@ document.addEventListener('keydown',e=>{
     case 'l':Playback.shuttle(1);return;
     case 'i':TL.setIn();return;
     case 'o':TL.setOut();return;
-    case 'm':TL.addMarker();return;
+    case 'm':e.shiftKey?EditOps.nextMarker():TL.addMarker();return;
+    case 'e':if(e.shiftKey)TL.toggleEnable();return;
+    case 'q':EditOps.rippleTrimPlayhead('l');return;
+    case 'w':EditOps.rippleTrimPlayhead('r');return;
+    case ',':EditOps.fromSource('insert');return;
+    case '.':EditOps.fromSource('overwrite');return;
     case 's':Shell.toggleSnap();return;
     case 'v':setTool('select');return;
     case 'c':setTool('razor');return;

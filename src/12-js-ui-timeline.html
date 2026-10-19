@@ -56,7 +56,7 @@ const TL={
 
       const td=document.createElement('div');
       const fa=s.tracks.find(t=>t.kind==='audio');
-      td.className='track '+tr.kind+(tr.kind==='audio'&&fa&&tr.id===fa.id?' first':'');
+      td.className='track '+tr.kind+(tr.kind==='audio'&&fa&&tr.id===fa.id?' first':'')+(tr.locked?' locked':'');
       td.style.height=tr.height+'px';
       td.dataset.track=tr.id;
       td.addEventListener('contextmenu',e=>{
@@ -66,7 +66,7 @@ const TL={
       });
       td.addEventListener('mousedown',e=>{
         if(e.target.closest('.clip'))return;
-        if(e.button===0){TL.clearSel();Bus.emit('sel');}
+        if(e.button===0&&!e.shiftKey){TL.clearSel();Bus.emit('sel');}
       });
       tk.appendChild(td);
     });
@@ -85,6 +85,8 @@ const TL={
       set('mute',tr.mute,tr.mute);
       set('solo',tr.solo,tr.solo);
       set('lock',tr.locked,tr.locked);
+      const lane=$('#tl-tracks .track[data-track="'+tr.id+'"]');
+      if(lane)lane.classList.toggle('locked',!!tr.locked);
     });
   },
   openTrackMenu(tr,x,y){
@@ -175,8 +177,8 @@ const TL={
       el.addEventListener('contextmenu',e=>{
         e.preventDefault();
         openMenu(null,[
-          {t:'Delete Marker',act:()=>{s.markers=s.markers.filter(x=>x!==m);Store.setDirty(true);TL.render();}},
-          {t:'Clear All Markers',act:()=>TL.clearMarkers()}
+          {t:'Delete Marker',act:()=>EditOps.deleteMarker(m)},
+          {t:'Clear All Markers',act:()=>EditOps.clearMarkers()}
         ],e.clientX,e.clientY);
       });
       ru.appendChild(el);
@@ -272,9 +274,12 @@ const TL={
   deleteSel(){
     const s=Store.seq;if(!s||!S.selClips.size)return;
     const items=[];
-    s.tracks.forEach(t=>t.clips.forEach(c=>{
-      if(S.selClips.has(c.id))items.push({clip:c,trackId:t.id});
-    }));
+    s.tracks.forEach(t=>{
+      if(t.locked)return;
+      t.clips.forEach(c=>{
+        if(S.selClips.has(c.id))items.push({clip:c,trackId:t.id});
+      });
+    });
     if(!items.length)return;
     cmdDeleteClips(items);
     action('Deleted '+items.length+' clip'+(items.length>1?'s':''));

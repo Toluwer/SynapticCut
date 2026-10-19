@@ -266,5 +266,20 @@
 .track.drop-ok{background:rgba(74,144,217,.10);box-shadow:inset 0 0 0 1px rgba(95,159,221,.5)}
 .track.drop-no{box-shadow:inset 0 0 0 1px rgba(176,97,90,.45)}
 #tl-ruler{cursor:ew-resize}
+/* ---- M2 editing: trim handles, move, marquee, snap guide, tip ---- */
+.clip{user-select:none}
+.clip::before,.clip::after{content:"";position:absolute;top:0;bottom:0;width:7px;z-index:4}
+.clip::before{left:0;cursor:w-resize}
+.clip::after{right:0;cursor:e-resize}
+.clip:hover::before,.clip:hover::after{background:rgba(255,255,255,.22)}
+.clip.moving{opacity:.72;pointer-events:none;z-index:8;filter:brightness(1.25)}
+#tl-snapline{position:absolute;top:0;bottom:0;width:1px;background:#e8b96a;z-index:9;pointer-events:none;display:none;box-shadow:0 0 0 .5px rgba(232,185,106,.5)}
+#tl-marquee{position:absolute;border:1px solid rgba(126,176,235,.85);background:rgba(95,159,221,.13);pointer-events:none;z-index:7;display:none}
+#edit-tip{position:fixed;z-index:400;background:#12161a;border:1px solid #343a40;border-radius:3px;padding:3px 7px;font:9.5px var(--mono);color:var(--txt-1);pointer-events:none;display:none;box-shadow:0 4px 12px rgba(0,0,0,.45);white-space:nowrap}
+:root[data-tool="razor"] .clip,:root[data-tool="razor"] .clip::before,:root[data-tool="razor"] .clip::after,:root[data-tool="razor"] .track{cursor:crosshair}
+:root[data-tool="hand"] .tl-scroll{cursor:grab}
+:root[data-tool="hand"] .tl-scroll:active{cursor:grabbing}
+.track.locked{background:repeating-linear-gradient(45deg,#1a1d1f 0 6px,#171a1d 6px 12px)}
+.track.a.locked{background:repeating-linear-gradient(45deg,#191d1c 0 6px,#161a19 6px 12px)}
 </style>
 </head>

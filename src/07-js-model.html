@@ -114,8 +114,12 @@ const Model={
 
   /* ---------- serialization ---------- */
   serialize(p){
+    /* refresh id counters so a save/load cycle never re-issues ids that
+       clips/bin/tracks created after project birth already use */
+    const q=JSON.parse(JSON.stringify(p));
+    q.idCounters=ID.counters();
     return JSON.stringify({app:'SynapticCut',version:SC.version,savedAt:new Date().toISOString(),
-      project:JSON.parse(JSON.stringify(p))});
+      project:q});
   },
   deserialize(json){
     const o=JSON.parse(json);
